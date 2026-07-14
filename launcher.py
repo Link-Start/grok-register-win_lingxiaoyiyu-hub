@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.json"
@@ -31,15 +33,44 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def open_port(host: str, port: int, timeout: float = 0.35) -> bool:
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def detect_local_proxy(preferred: str = "") -> str:
+    """If preferred proxy port is down, probe common Clash ports (Verge often uses 7897)."""
+    pref = (preferred or "").strip()
+    if pref:
+        u = urlparse(pref if "://" in pref else "http://" + pref)
+        host = u.hostname or "127.0.0.1"
+        port = u.port or 7890
+        if open_port(host, port):
+            return pref if "://" in pref else f"http://{host}:{port}"
+    for port in (7897, 7890, 7891, 7892, 10809, 20171, 1080, 2080, 8888):
+        if open_port("127.0.0.1", port):
+            return f"http://127.0.0.1:{port}"
+    return pref or "http://127.0.0.1:7897"
+
+
 def ensure_config() -> dict:
     if not CONFIG.exists():
         if not CONFIG_EXAMPLE.exists():
-            raise SystemExit("缺少 config.example.json")
+            raise SystemExit("missing config.example.json")
         shutil.copyfile(CONFIG_EXAMPLE, CONFIG)
-        log(f"[*] 已生成 {CONFIG.name}（可改 proxy / 邮箱配置）")
-    import json
+        log(f"[*] created {CONFIG.name}")
+    return json.loads(CONFIG.read_text(encoding="utf-8-sig"))
 
-    return json.loads(CONFIG.read_text(encoding="utf-8"))
+
+def save_config(cfg: dict) -> None:
+    CONFIG.write_text(
+        json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def ensure_dirs() -> None:
@@ -56,35 +87,31 @@ def python_bin() -> str:
 def check_proxy(proxy: str) -> None:
     proxy = (proxy or "").strip()
     if not proxy:
-        log("[!] config.json 未配置 proxy，注册/转 CPA 可能失败")
+        log("[!] config.json has no proxy; register/CPA may fail")
         return
-    # TCP check host:port
     try:
-        from urllib.parse import urlparse
-
         u = urlparse(proxy if "://" in proxy else "http://" + proxy)
         host = u.hostname or "127.0.0.1"
-        port = u.port or 7890
+        port = u.port or 7897
         s = socket.create_connection((host, port), timeout=2)
         s.close()
-        log(f"[+] 代理端口可达: {host}:{port}")
+        log(f"[+] proxy port open: {host}:{port}")
     except Exception as e:
-        log(f"[!] 代理端口不通 ({proxy}): {e}")
-        log("    请先打开本机 Clash，并确认 mixed-port / HTTP 端口为 7890（或改 config.json）")
+        log(f"[!] proxy port closed ({proxy}): {e}")
+        log("    Start Clash Verge first; common mixed port is 7897 (not always 7890)")
         return
-    # optional http probe
     try:
         handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
         opener = urllib.request.build_opener(handler)
         with opener.open("https://api.ipify.org", timeout=10) as resp:
             ip = resp.read().decode("utf-8", "replace").strip()
-        log(f"[+] 代理出口 IP: {ip}")
+        log(f"[+] proxy exit IP: {ip}")
     except Exception as e:
-        log(f"[!] 经代理访问外网失败: {e}")
-        log("    请在 Clash 里换一个可用节点后再注册")
+        log(f"[!] proxy cannot reach internet: {e}")
+        log("    Switch to a working node in Clash, then retry")
 
 
-def wait_health(timeout: float = 20.0) -> bool:
+def wait_health(timeout: float = 25.0) -> bool:
     url = f"http://{PANEL_HOST}:{PANEL_PORT}/health"
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -114,7 +141,15 @@ def _main_impl() -> int:
     os.chdir(ROOT)
     ensure_dirs()
     cfg = ensure_config()
-    proxy = str(cfg.get("proxy") or "http://127.0.0.1:7890").strip()
+    proxy = detect_local_proxy(str(cfg.get("proxy") or "").strip())
+    if proxy and cfg.get("proxy") != proxy:
+        cfg["proxy"] = proxy
+        try:
+            save_config(cfg)
+            log(f"[*] proxy auto-updated to {proxy} (saved config.json)")
+        except Exception as e:
+            log(f"[!] save config failed: {e}")
+
     log("========== Grok Register Win ==========")
     log(f"Dir: {ROOT}")
     log(f"Python: {python_bin()}")

@@ -506,10 +506,149 @@ def to_grok2api_pool(accounts: List[dict]) -> dict:
 def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
     return {}
+
+
+def email_config_public(cfg: Optional[dict] = None) -> dict:
+    """Email settings for panel UI (custom maps to cloudflare_* backend)."""
+    c = cfg if isinstance(cfg, dict) else load_config()
+    provider = str(c.get("email_provider") or "tempmailer").strip().lower()
+    if provider == "cloudflare":
+        ui_provider = "custom"
+    elif provider in ("tempmailer", "inboxkitten"):
+        ui_provider = provider
+    else:
+        # unknown / unpaid providers -> show as custom if base set, else tempmailer
+        ui_provider = "custom" if c.get("cloudflare_api_base") else "tempmailer"
+    return {
+        "provider": ui_provider,
+        "email_failover": bool(c.get("email_failover", True)),
+        "tempmailer_domain": str(c.get("tempmailer_domain") or c.get("defaultDomains") or "").strip(),
+        "inboxkitten_domain": str(c.get("inboxkitten_domain") or "inboxkitten.com").strip(),
+        "custom_api_base": str(c.get("cloudflare_api_base") or "").strip(),
+        "custom_api_key": str(c.get("cloudflare_api_key") or "").strip(),
+        "custom_auth_mode": (
+            "bearer"
+            if str(c.get("cloudflare_auth_mode") or "").strip().lower()
+            in ("auth", "bearer", "authorization")
+            else str(c.get("cloudflare_auth_mode") or "x-admin-auth").strip()
+        ),
+        "custom_domain": str(c.get("defaultDomains") or "").strip(),
+        "custom_path_accounts": str(
+            c.get("cloudflare_path_accounts") or "/admin/new_address"
+        ).strip(),
+        "custom_path_messages": str(
+            c.get("cloudflare_path_messages") or "/api/mails"
+        ).strip(),
+        "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
+        "hint": (
+            "自定义：对接自建临时邮箱 API（兼容 cloudflare_temp_email）。"
+            "需提供可「创建地址」和「收信读验证码」的接口。"
+        ),
+    }
+
+
+def apply_email_config_from_ui(data: dict) -> dict:
+    """Merge panel email form into config.json and return public view."""
+    cfg = load_config()
+    provider = str(data.get("provider") or "tempmailer").strip().lower()
+    if provider not in ("tempmailer", "inboxkitten", "custom"):
+        raise ValueError("provider 必须是 tempmailer / inboxkitten / custom")
+
+    cfg["email_failover"] = bool(data.get("email_failover", True))
+
+    if provider == "tempmailer":
+        cfg["email_provider"] = "tempmailer"
+        domain = str(data.get("tempmailer_domain") or cfg.get("tempmailer_domain") or "bluenode.cc").strip()
+        cfg["tempmailer_domain"] = domain
+        cfg["tempmailer_domains"] = [domain] if domain else cfg.get("tempmailer_domains") or []
+        cfg["defaultDomains"] = domain or cfg.get("defaultDomains") or ""
+        # failover only among free built-ins unless custom also configured
+        chain = ["tempmailer", "inboxkitten"]
+        if str(cfg.get("cloudflare_api_base") or "").strip():
+            chain.append("cloudflare")
+        cfg["email_providers"] = chain
+    elif provider == "inboxkitten":
+        cfg["email_provider"] = "inboxkitten"
+        domain = str(data.get("inboxkitten_domain") or "inboxkitten.com").strip()
+        cfg["inboxkitten_domain"] = domain or "inboxkitten.com"
+        chain = ["inboxkitten", "tempmailer"]
+        if str(cfg.get("cloudflare_api_base") or "").strip():
+            chain.append("cloudflare")
+        cfg["email_providers"] = chain
+    else:
+        # custom -> cloudflare backend channel
+        api_base = str(data.get("custom_api_base") or "").strip().rstrip("/")
+        if not api_base:
+            raise ValueError("自定义模式必须填写 API 地址 cloudflare_api_base")
+        cfg["email_provider"] = "cloudflare"
+        cfg["cloudflare_api_base"] = api_base
+        cfg["cloudflare_api_key"] = str(data.get("custom_api_key") or "").strip()
+        mode = str(data.get("custom_auth_mode") or "x-admin-auth").strip().lower()
+        if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
+            mode = "x-admin-auth"
+        # register: x-api-key / x-admin-auth / query-key / none; anything else + key => Authorization Bearer
+        if mode == "bearer":
+            cfg["cloudflare_auth_mode"] = "auth"
+        else:
+            cfg["cloudflare_auth_mode"] = mode
+        domain = str(data.get("custom_domain") or "").strip()
+        cfg["defaultDomains"] = domain
+        cfg["cloudflare_path_accounts"] = str(
+            data.get("custom_path_accounts") or "/admin/new_address"
+        ).strip() or "/admin/new_address"
+        cfg["cloudflare_path_messages"] = str(
+            data.get("custom_path_messages") or "/api/mails"
+        ).strip() or "/api/mails"
+        cfg["cloudflare_path_token"] = str(
+            data.get("custom_path_token") or "/api/token"
+        ).strip() or "/api/token"
+        # custom only in chain unless failover wants built-ins too
+        if cfg.get("email_failover"):
+            cfg["email_providers"] = ["cloudflare", "tempmailer", "inboxkitten"]
+        else:
+            cfg["email_providers"] = ["cloudflare"]
+
+    save_config(cfg)
+    return email_config_public(cfg)
+
+
+
+def resolve_proxy_url() -> str:
+    """Prefer config.json proxy; auto-probe common Clash ports if dead."""
+    import socket
+    from urllib.parse import urlparse
+
+    def open_port(host: str, port: int, timeout: float = 0.35) -> bool:
+        try:
+            s = socket.create_connection((host, port), timeout=timeout)
+            s.close()
+            return True
+        except Exception:
+            return False
+
+    preferred = ""
+    try:
+        cfg = load_config()
+        preferred = str(cfg.get("proxy") or "").strip()
+    except Exception:
+        preferred = ""
+    preferred = preferred or os.environ.get("GROK_PROXY", "").strip() or PROXY_URL
+
+    def ok(url: str) -> bool:
+        u = urlparse(url if "://" in url else "http://" + url)
+        return open_port(u.hostname or "127.0.0.1", u.port or 7890)
+
+    if preferred and ok(preferred):
+        return preferred
+    for port in (7897, 7890, 7891, 7892, 10809, 20171, 1080, 2080, 8888):
+        url = f"http://127.0.0.1:{port}"
+        if ok(url):
+            return url
+    return preferred or "http://127.0.0.1:7890"
 
 
 def save_config(cfg: dict):
@@ -664,7 +803,10 @@ def _run_one_round(round_no: int, total: int) -> bool:
     global _proc
     cfg = load_config()
     cfg["register_count"] = 1
-    cfg["proxy"] = PROXY_URL
+    cfg["proxy"] = resolve_proxy_url()
+    global PROXY_URL
+    PROXY_URL = cfg["proxy"]
+    os.environ["GROK_PROXY"] = PROXY_URL
     cfg.setdefault("email_provider", "tempmailer")
     save_config(cfg)
 
@@ -811,7 +953,15 @@ def job_worker(count: int, node: str = "", node_mode: str = "fixed", node_list: 
             _job["finished_at"] = None
             _job["last_error"] = ""
 
-        log_line(f"[*] 使用外部 Clash 代理: {PROXY_URL}（节点请在 Clash 客户端选择）")
+        proxy_now = resolve_proxy_url()
+        global PROXY_URL
+        PROXY_URL = proxy_now
+        os.environ["GROK_PROXY"] = proxy_now
+        try:
+            cfg0 = load_config(); cfg0["proxy"] = proxy_now; save_config(cfg0)
+        except Exception:
+            pass
+        log_line(f"[*] 使用外部 Clash 代理: {proxy_now}（节点请在 Clash 客户端选择）")
         log_line(f"[*] 出口探测: {clash_exit_ip()}")
 
         for i in range(1, count + 1):
@@ -1029,8 +1179,73 @@ INDEX_HTML = r"""
       <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">补转未转换 CPA</button>
     </div>
     <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">
-      代理走本机 Clash（默认 http://127.0.0.1:7890，见 config.json）。节点请在 Clash 客户端里选择/更新订阅。注册成功后自动转 CPA。
+      代理走本机 Clash（config.json 的 proxy，常见 7897）。节点在 Clash 里选。注册成功后自动转 CPA。
     </div>
+  </div>
+
+  <div class="card">
+    <h2>邮箱服务</h2>
+    <div class="row">
+      <label>邮箱源
+        <select id="email_provider" onchange="onEmailProviderChange()">
+          <option value="tempmailer">Tempmailer（内置免 key）</option>
+          <option value="inboxkitten">InboxKitten（内置免 key）</option>
+          <option value="custom">自定义（自建临时邮 API）</option>
+        </select>
+      </label>
+      <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
+        <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
+      </label>
+      <button class="btn primary" onclick="saveEmailConfig()">保存邮箱设置</button>
+    </div>
+    <div class="row" id="email_builtin_extra" style="margin-top:8px">
+      <label id="lbl_temp_domain">Tempmailer 域名
+        <input type="text" id="tempmailer_domain" placeholder="bluenode.cc"/>
+      </label>
+      <label id="lbl_ik_domain" style="display:none">InboxKitten 域名
+        <input type="text" id="inboxkitten_domain" placeholder="inboxkitten.com"/>
+      </label>
+    </div>
+    <div id="email_custom_box" style="display:none;margin-top:10px">
+      <div class="muted" style="font-size:12px;margin-bottom:8px;line-height:1.5">
+        自定义对接自建临时邮箱（兼容 <b>cloudflare_temp_email</b> 一类）：程序调用「创建地址」拿到邮箱+token，再轮询「收信」提取 xAI 验证码。<br/>
+        常见管理员创建路径：<code>/admin/new_address</code>，鉴权头：<code>x-admin-auth</code>。
+      </div>
+      <div class="row">
+        <label style="flex:2">API 根地址
+          <input type="text" id="custom_api_base" placeholder="https://mail.example.com"/>
+        </label>
+        <label>API Key / 管理密码
+          <input type="password" id="custom_api_key" placeholder="可选，视你的服务而定"/>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>鉴权方式
+          <select id="custom_auth_mode">
+            <option value="x-admin-auth">x-admin-auth（推荐，cf-temp-email 管理）</option>
+            <option value="bearer">Authorization Bearer</option>
+            <option value="x-api-key">X-API-Key</option>
+            <option value="query-key">URL ?key=</option>
+            <option value="none">无鉴权</option>
+          </select>
+        </label>
+        <label>邮箱域名（可空则服务端默认）
+          <input type="text" id="custom_domain" placeholder="mail.example.com"/>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>创建地址路径
+          <input type="text" id="custom_path_accounts" placeholder="/admin/new_address"/>
+        </label>
+        <label>收信路径
+          <input type="text" id="custom_path_messages" placeholder="/api/mails"/>
+        </label>
+        <label>Token 路径
+          <input type="text" id="custom_path_token" placeholder="/api/token"/>
+        </label>
+      </div>
+    </div>
+    <div class="muted" style="margin-top:10px;font-size:12px" id="email_hint">加载邮箱配置…</div>
   </div>
 
   <div class="card">
@@ -1039,13 +1254,27 @@ INDEX_HTML = r"""
   </div>
 
   <div class="card" style="padding:0;overflow:hidden">
-    <div style="padding:14px 14px 0"><h2 style="margin:0">账号文件</h2></div>
+    <div style="padding:14px 14px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
+      <h2 style="margin:0">账号文件</h2>
+      <div class="actions" style="margin:0">
+        <button class="btn" type="button" onclick="toggleSelectAllFiles(true)">全选</button>
+        <button class="btn" type="button" onclick="toggleSelectAllFiles(false)">取消全选</button>
+        <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
+      </div>
+    </div>
+    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选已下载/不需要的 accounts_*.txt，删除后不会再出现在「下载 SSO」合并结果里。</div>
     {% if files %}
     <table>
-      <thead><tr><th>文件</th><th>数量</th><th>时间</th><th>操作</th></tr></thead>
+      <thead>
+        <tr>
+          <th style="width:44px"><input type="checkbox" id="chk_all_files" onclick="toggleSelectAllFiles(this.checked)" title="全选"/></th>
+          <th>文件</th><th>数量</th><th>时间</th><th>操作</th>
+        </tr>
+      </thead>
       <tbody>
       {% for f in files %}
         <tr>
+          <td><input type="checkbox" class="chk-file" value="{{ f.name }}"/></td>
           <td class="mono">{{ f.name }}</td>
           <td><span class="tag">{{ f.count }}</span></td>
           <td class="muted">{{ f.mtime }}</td>
@@ -1071,9 +1300,95 @@ async function api(url, opt){
   if(!r.ok) throw new Error(j.error||r.statusText||'request failed');
   return j;
 }
+function onEmailProviderChange(){
+  const p=document.getElementById('email_provider').value;
+  const custom=document.getElementById('email_custom_box');
+  const builtin=document.getElementById('email_builtin_extra');
+  const lblT=document.getElementById('lbl_temp_domain');
+  const lblI=document.getElementById('lbl_ik_domain');
+  if(p==='custom'){
+    custom.style.display='block';
+    builtin.style.display='none';
+  }else{
+    custom.style.display='none';
+    builtin.style.display='flex';
+    lblT.style.display=p==='tempmailer'?'flex':'none';
+    lblI.style.display=p==='inboxkitten'?'flex':'none';
+  }
+}
+async function loadEmailConfig(){
+  try{
+    const j=await api('/api/config/email');
+    const e=j.email||{};
+    document.getElementById('email_provider').value=e.provider||'tempmailer';
+    document.getElementById('email_failover').checked=!!e.email_failover;
+    document.getElementById('tempmailer_domain').value=e.tempmailer_domain||'';
+    document.getElementById('inboxkitten_domain').value=e.inboxkitten_domain||'inboxkitten.com';
+    document.getElementById('custom_api_base').value=e.custom_api_base||'';
+    document.getElementById('custom_api_key').value=e.custom_api_key||'';
+    document.getElementById('custom_auth_mode').value=e.custom_auth_mode||'x-admin-auth';
+    document.getElementById('custom_domain').value=e.custom_domain||'';
+    document.getElementById('custom_path_accounts').value=e.custom_path_accounts||'/admin/new_address';
+    document.getElementById('custom_path_messages').value=e.custom_path_messages||'/api/mails';
+    document.getElementById('custom_path_token').value=e.custom_path_token||'/api/token';
+    document.getElementById('email_hint').textContent=e.hint||'';
+    onEmailProviderChange();
+  }catch(err){
+    document.getElementById('email_hint').textContent='加载邮箱配置失败: '+err.message;
+  }
+}
+async function saveEmailConfig(){
+  const body={
+    provider: document.getElementById('email_provider').value,
+    email_failover: document.getElementById('email_failover').checked,
+    tempmailer_domain: document.getElementById('tempmailer_domain').value.trim(),
+    inboxkitten_domain: document.getElementById('inboxkitten_domain').value.trim(),
+    custom_api_base: document.getElementById('custom_api_base').value.trim(),
+    custom_api_key: document.getElementById('custom_api_key').value,
+    custom_auth_mode: document.getElementById('custom_auth_mode').value,
+    custom_domain: document.getElementById('custom_domain').value.trim(),
+    custom_path_accounts: document.getElementById('custom_path_accounts').value.trim(),
+    custom_path_messages: document.getElementById('custom_path_messages').value.trim(),
+    custom_path_token: document.getElementById('custom_path_token').value.trim(),
+  };
+  try{
+    const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    toast(j.message||'邮箱设置已保存');
+    if(j.email){
+      document.getElementById('email_hint').textContent='已保存 · 当前: '+(j.email.provider||'')+(j.email.custom_api_base?(' · '+j.email.custom_api_base):'');
+    }
+  }catch(e){toast('保存失败: '+e.message)}
+}
+function toggleSelectAllFiles(on){
+  const boxes=document.querySelectorAll('.chk-file');
+  boxes.forEach(b=>{ b.checked=!!on; });
+  const all=document.getElementById('chk_all_files');
+  if(all) all.checked=!!on;
+}
+async function deleteSelectedFiles(){
+  const files=[...document.querySelectorAll('.chk-file:checked')].map(b=>b.value);
+  if(!files.length){
+    toast('请先勾选要删除的账号文件');
+    return;
+  }
+  if(!confirm('确认删除选中的 '+files.length+' 个账号文件？\n删除后无法恢复，下载 SSO 时也不会再包含它们。')){
+    return;
+  }
+  try{
+    const j=await api('/api/accounts/delete',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({files})
+    });
+    toast(j.message||('已删除 '+((j.deleted||[]).length)+' 个文件'));
+    setTimeout(()=>location.reload(), 500);
+  }catch(e){toast('删除失败: '+e.message)}
+}
 async function startJob(){
   const count=parseInt(document.getElementById('count').value||'1',10);
   try{
+    // auto-save email settings before start
+    try{ await saveEmailConfig(); }catch(e){}
     const j=await api('/api/job/start',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({count})});
     toast(j.message||'已启动');
@@ -1126,6 +1441,7 @@ async function poll(){
     }
   }catch(e){}
 }
+loadEmailConfig();
 poll();
 setInterval(poll, 2000);
 </script>
@@ -1422,6 +1738,70 @@ def api_nodes_select():
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
     return jsonify({"ok": True, "message": msg, "exit": clash_exit_ip()})
+
+
+@app.post("/api/accounts/delete")
+def api_accounts_delete():
+    """Delete selected accounts_*.txt files (after user downloaded them)."""
+    need = require_login()
+    if need:
+        return need
+    data = request.get_json(force=True, silent=True) or {}
+    names = data.get("files") or data.get("names") or []
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list) or not names:
+        return jsonify({"ok": False, "error": "files required"}), 400
+
+    deleted = []
+    missing = []
+    errors = []
+    for name in names:
+        name = str(name or "").strip()
+        path = safe_name(name)
+        if not path:
+            missing.append(name)
+            continue
+        try:
+            path.unlink()
+            deleted.append(path.name)
+            log_line(f"[*] 已删除账号文件: {path.name}")
+        except Exception as e:
+            errors.append(f"{name}: {e}")
+
+    if not deleted and errors:
+        return jsonify({"ok": False, "error": "; ".join(errors)}), 400
+    return jsonify(
+        {
+            "ok": True,
+            "deleted": deleted,
+            "missing": missing,
+            "errors": errors,
+            "message": f"已删除 {len(deleted)} 个文件"
+            + (f"，跳过 {len(missing)}" if missing else ""),
+        }
+    )
+
+
+@app.get("/api/config/email")
+def api_get_email_config():
+    need = require_login()
+    if need:
+        return need
+    return jsonify({"ok": True, "email": email_config_public()})
+
+
+@app.post("/api/config/email")
+def api_set_email_config():
+    need = require_login()
+    if need:
+        return need
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        email = apply_email_config_from_ui(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "message": "邮箱设置已保存", "email": email})
 
 
 @app.get("/api/job/status")
