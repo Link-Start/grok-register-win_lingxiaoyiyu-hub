@@ -1,0 +1,38 @@
+{
+  "proxy": "http://127.0.0.1:7897",
+  "allow_proxy_fallback": false,
+  "browser_engine": "chromium",
+  "enable_nsfw": true,
+  "register_count": 1,
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+  "email_provider": "tempmailer",
+  "email_failover": true,
+  "email_providers": [
+    "tempmailer",
+    "duckmail",
+    "yyds",
+    "cloudflare"
+  ],
+  "tempmailer_api_base": "https://tempmailer.cc/api",
+  "tempmailer_domain": "bluenode.cc",
+  "tempmailer_domains": [
+    "bluenode.cc"
+  ],
+  "duckmail_api_key": "",
+  "cloudflare_api_base": "",
+  "cloudflare_api_key": "",
+  "cloudflare_auth_mode": "none",
+  "cloudflare_path_domains": "/api/domains",
+  "cloudflare_path_accounts": "/api/new_address",
+  "cloudflare_path_token": "/api/token",
+  "cloudflare_path_messages": "/api/mails",
+  "yyds_api_key": "",
+  "yyds_jwt": "",
+  "defaultDomains": "bluenode.cc",
+  "grok2api_auto_add_local": false,
+  "grok2api_local_token_file": "",
+  "grok2api_pool_name": "ssoBasic",
+  "grok2api_auto_add_remote": false,
+  "grok2api_remote_base": "",
+  "grok2api_remote_app_key": ""
+}
