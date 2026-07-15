@@ -170,4 +170,4 @@ grok-register-win/
 
 ## License
 
-MIT（若上游组件另有协议，以对应文件为准）
+本项目基于 [MIT License](LICENSE) 发布。若上游组件另有协议，以对应文件为准。
