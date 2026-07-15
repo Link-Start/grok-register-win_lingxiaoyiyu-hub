@@ -1,5 +1,7 @@
 # Grok Register Win
 
+![Panel](docs/panel.png)
+
 Windows 下双击即用的 Grok（xAI）账号自动注册面板。基于浏览器自动化完成注册，自动换取 CPA OAuth 凭证，并开启 NSFW 偏好。
 
 ## 功能
@@ -115,6 +117,7 @@ grok-register-win/
 ├── data/
 │   ├── logs/                 # 运行日志
 │   └── cpa/                  # 已转换 CPA JSON
+├── docs/                     # 截图与文档
 └── accounts_*.txt            # 注册产出
 ```
 
@@ -139,6 +142,12 @@ grok-register-win/
 ---
 
 ## 更新日志
+
+### v1.0.6（2026-07-16）
+- 修复 CPA 转换在中文路径下失败：curl_cffi 无法处理非 ASCII CA 证书路径，启动时自动复制到 `%TEMP%`
+- 面板 UI 美化：Grok 风格 logo（黑底白字）、卡片渐变指示条、按钮/表格悬停效果
+- 运行日志过滤：去重复时间戳、过滤 Cloudflare 轮询刷屏、去重信息行、超长截断
+- 免密模式启动不再显示误导性密码提示
 
 ### v1.0.5（2026-07-16）
 - 修复 CPA 转换 404：consent 提交改为标准 HTML 表单 POST，从 302 重定向提取 OAuth code
