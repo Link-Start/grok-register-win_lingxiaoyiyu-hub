@@ -17,6 +17,14 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Ensure stdout/stderr use UTF-8 on Windows (default is GBK/CP936)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.json"
 CONFIG_EXAMPLE = ROOT / "config.example.json"

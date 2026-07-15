@@ -4,15 +4,41 @@ Windows 双击运行的 Grok 注册机面板：
 
 - **代理**：使用你本机已安装的 Clash（不内置 mihomo、不内置订阅）
 - **自动探测代理端口**（常见 `7897` / `7890` 等，Clash Verge 多为 7897）
-- **注册**：浏览器自动化注册
+- **注册**：浏览器自动化注册（Chromium 有头 / Camoufox 无头反检测）
 - **邮箱**：面板可选 Tempmailer / 自定义自建 API（InboxKitten 已移除：xAI 拒绝该域名）
 - **自动转 CPA**：注册成功后后台把 web SSO 换成 CLIProxyAPI 可用的 OAuth JSON
+- **NSFW 自动开启**：注册成功后自动设置 ToS、生日、NSFW 偏好
 - **下载**：
   - SSO TXT：`email----password----sso`
   - CPA ZIP：`xai-*.json`（`auth_kind=oauth`）
 - **账号文件**：可勾选删除，避免重复下载
 
 > 仅供学习研究。自动化注册可能违反平台条款，风险自负。
+
+---
+
+## 更新日志
+
+### v1.0.5（2026-07-16）
+
+**修复：**
+- **CPA 转换 404 "Server action not found"**：consent 页面已改为标准 HTML 表单 POST 到 `auth.x.ai/oauth2/authorize`，不再使用 Next.js Server Action。重写 consent 提交逻辑为 `application/x-www-form-urlencoded` 表单提交，从 302 重定向 `Location` header 提取 OAuth code。
+- **NSFW 开启 GBK 编码崩溃**：Windows 控制台默认 GBK 编码遇到 Unicode 字符（`\ufffd`）时 `print()` 崩溃。在 `launcher.py`、`grok_register_ttk.py`、`panel/app.py` 三个入口文件强制 `stdout/stderr` 使用 UTF-8 + `errors="replace"`。
+- **子进程 stdout GBK 解码崩溃**：面板读取注册子进程输出时 `UnicodeDecodeError`。改为 `encoding="utf-8", errors="replace"`。
+- **Playwright 驱动崩溃（coreBundle.js）**：Camoufox/Firefox 页面产生未捕获 JS 错误且 `pageError.location` 为 `undefined` 时，Playwright Node.js 驱动进程崩溃，导致浏览器在 SSO 提取阶段死亡。新增 `lib/patch_playwright.py` 自动修补 `pageError.location?.url` 和 `tString` 验证器默认值。
+
+**改进：**
+- **提交按钮检测扩展**：注册流程中 "You are signing into" 确认页面找不到提交按钮。选择器新增 `<a href>` 标签，文本模式新增 `continue`/`signin`/`proceed`/`confirm`/`next`/`agree`/`authorize`/`allow`/`继续`，排除 `go back`/`返回`。
+- **浏览器崩溃快速失败**：Camoufox 后端检测到 `connection closed`/`browser closed`/`pipe closed` 等致命错误后立即标记死亡，后续操作快速失败而非反复超时等待。
+- **CPA 调试支持**：consent 页面提取失败时自动 dump HTML 到 `%TEMP%\sso2cpa_consent_debug.html`，错误消息包含 `action_id` 和 `redirect_url` 便于诊断。
+
+### v1.0.4（2026-07-16）
+
+- 新增 `lib/patch_playwright.py`：启动时自动修补 Playwright `coreBundle.js` 的 `pageError.location` 崩溃
+- `start.bat` 和 `launcher.py` 在依赖安装后自动执行 patch（幂等，已修补不会重复）
+- 扩展提交按钮检测逻辑（`<a>` 标签 + 更多文本模式）
+- Camoufox 浏览器崩溃快速失败机制
+- `.gitignore` 新增 `mail_credentials.txt`
 
 ---
 
@@ -103,12 +129,13 @@ $env:PANEL_PASSWORD="你的密码"
 grok-register-win/
   start.bat / 启动.bat  # 双击启动
   setup.bat             # 仅安装依赖
-  launcher.py           # 启动器（代理探测）
+  launcher.py           # 启动器（代理探测、Playwright 修补）
   grok_register_ttk.py  # 注册机
   config.example.json
   panel/app.py          # Web 面板
   lib/sso2cpa_core.py   # SSO → CPA
   lib/camoufox_backend.py  # Camoufox 无头适配层
+  lib/patch_playwright.py  # Playwright 驱动崩溃自动修补
   data/logs/            # 运行日志
   data/cpa/             # 已转换 CPA JSON
   accounts_*.txt        # 注册产出（可勾选删除）

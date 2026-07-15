@@ -23,6 +23,14 @@ import json
 import base64
 import select
 import socket
+
+# Ensure stdout/stderr use UTF-8 on Windows (default is GBK/CP936)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 import socketserver
 import ssl
 import urllib.parse
@@ -4278,7 +4286,10 @@ class CliStopController:
 
 def cli_log(message):
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
+    try:
+        print(f"[{timestamp}] {message}", flush=True)
+    except UnicodeEncodeError:
+        print(f"[{timestamp}] {message}".encode("ascii", "replace").decode("ascii"), flush=True)
 
 
 def run_registration_cli(count):

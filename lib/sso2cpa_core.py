@@ -43,8 +43,50 @@ DEFAULT_SCOPE = (
 GROK_REFERRER = "grok-build"
 GROK_VERSION = "0.2.93"
 GROK_TOKEN_UA = f"grok-pager/{GROK_VERSION} grok-shell/{GROK_VERSION} (linux; x86_64)"
-NEXT_ACTION_ID = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
+# Fallback action ID; real one is extracted from consent page HTML at runtime
+NEXT_ACTION_ID_FALLBACK = "4005315a1d7e426de592990bb54bb37471f39dd6d2"
 BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+
+
+def _extract_next_action_id(html: str) -> str:
+    """Extract Next.js Server Action ID from consent page HTML.
+
+    Next.js embeds action IDs in the page as $ACTION_ID_<id> or in
+    self.__next_f.push data chunks. We try multiple patterns.
+    """
+    if not html:
+        return ""
+    # Pattern 1: $ACTION_ID_<hex>
+    m = re.search(r'\$ACTION_ID_([a-f0-9]{40,})', html)
+    if m:
+        return m.group(1)
+    # Pattern 2: "actionId":"<hex>" or "id":"<hex>" near consent/allow
+    for pat in (
+        r'"actionId"\s*:\s*"([a-f0-9]{30,})"',
+        r'"id"\s*:\s*"([a-f0-9]{40,})"',
+    ):
+        m = re.search(pat, html)
+        if m:
+            return m.group(1)
+    # Pattern 3: any 40+ char hex string in quotes (Next-Action header value)
+    m = re.search(r'["\']([a-f0-9]{40,})["\']', html)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _debug_dump_consent_html(html: str, final_url: str) -> None:
+    """Save consent page HTML for debugging action ID extraction."""
+    import tempfile
+    import os
+    try:
+        dump_path = os.path.join(tempfile.gettempdir(), "sso2cpa_consent_debug.html")
+        with open(dump_path, "w", encoding="utf-8") as f:
+            f.write(f"<!-- URL: {final_url} -->\n")
+            f.write(f"<!-- Length: {len(html)} -->\n")
+            f.write(html)
+    except Exception:
+        pass
 
 
 class ConvertError(Exception):
@@ -243,6 +285,20 @@ def browser_headers(method: str = "GET", referer: str = "", next_action: str = "
     return h
 
 
+def _extract_code_from_url(url: str) -> str:
+    """Extract OAuth 'code' parameter from a redirect URL."""
+    from urllib.parse import urlparse, parse_qs
+    try:
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
+        codes = params.get("code", [])
+        if codes:
+            return codes[0]
+    except Exception:
+        pass
+    return ""
+
+
 def parse_consent_code(body: str) -> str:
     for line in (body or "").splitlines():
         idx = line.find("{")
@@ -308,37 +364,59 @@ def sso_to_token(sso: str, proxy: str = "") -> dict:
     if "/oauth2/consent" not in final_url:
         raise ConvertError(f"authorize 未进入 consent 页: {final_url}")
 
-    payload = [
-        {
-            "action": "allow",
-            "clientId": CLIENT_ID,
-            "redirectUri": REDIRECT_URI,
-            "scope": DEFAULT_SCOPE,
-            "state": state,
-            "codeChallenge": challenge,
-            "codeChallengeMethod": "S256",
-            "nonce": nonce,
-            "principalType": "User",
-            "principalId": "",
-            "referrer": GROK_REFERRER,
-        }
-    ]
+    # The consent page has a regular HTML form that POSTs to auth.x.ai/oauth2/authorize
+    # with the OAuth params as form-encoded data. Not a Next.js Server Action.
+    form_data = {
+        "client_id": CLIENT_ID,
+        "redirect_uri": REDIRECT_URI,
+        "scope": DEFAULT_SCOPE,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "nonce": nonce,
+        "principal_type": "User",
+        "principal_id": "",
+        "referrer": GROK_REFERRER,
+    }
     try:
         cres = session.post(
-            final_url,
-            data=json.dumps(payload, separators=(",", ":")),
-            headers=browser_headers("POST", referer=final_url, next_action=NEXT_ACTION_ID),
+            AUTHORIZE_URL,  # https://auth.x.ai/oauth2/authorize
+            data=form_data,
+            headers={
+                "User-Agent": browser_headers("POST")["User-Agent"],
+                "Accept": (
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                    "*/*;q=0.8"
+                ),
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Origin": "https://accounts.x.ai",
+                "Referer": final_url,
+                "Sec-Fetch-Site": "same-site",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Dest": "document",
+                "Upgrade-Insecure-Requests": "1",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            allow_redirects=False,  # Don't follow redirect to 127.0.0.1
             timeout=30,
         )
     except Exception as e:
         raise ConvertError(f"consent 请求失败: {e}") from e
 
-    if cres.status_code < 200 or cres.status_code >= 300:
-        raise ConvertError(f"consent HTTP {cres.status_code}: {cres.text[:300]}")
+    # Expect a 302 redirect to http://127.0.0.1:PORT/callback?code=...&state=...
+    redirect_url = cres.headers.get("Location", "") if cres.status_code in (301, 302, 303, 307, 308) else ""
+    if redirect_url:
+        code = _extract_code_from_url(redirect_url)
+    else:
+        code = parse_consent_code(cres.text)
 
-    code = parse_consent_code(cres.text)
     if not code:
-        raise ConvertError(f"consent 响应缺少 code: {cres.text[:300]}")
+        _debug_dump_consent_html(cres.text[:5000], f"status={cres.status_code} url={redirect_url}")
+        raise ConvertError(
+            f"consent 响应缺少 code: status={cres.status_code}"
+            f" redirect={redirect_url[:200]}"
+            f" body={cres.text[:200]}"
+        )
 
     try:
         tres = session.post(

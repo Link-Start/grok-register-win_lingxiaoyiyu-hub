@@ -23,6 +23,14 @@ import zipfile
 from collections import deque
 from datetime import datetime
 from pathlib import Path
+
+# Ensure stdout/stderr use UTF-8 on Windows (default is GBK/CP936)
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from flask import (
@@ -854,6 +862,8 @@ def _run_one_round(round_no: int, total: int) -> bool:
             stderr=subprocess.STDOUT,
             env=env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
     except Exception as e:
