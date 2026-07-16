@@ -708,7 +708,7 @@ def process_upload_files(files) -> dict:
             ok, info = save_cpa_entry_file(entry, source=f"upload:{filename}")
             if ok:
                 saved += 1
-                log_line(f"[UPLOAD] CPA 入库 {info}")
+                log_line(f"[SSO换票] CPA 入库 {info}")
             else:
                 skipped += 1
                 errors.append(f"{filename}: {info}")
@@ -1627,18 +1627,18 @@ INDEX_HTML = r"""
   </div>
 
   <div class="card">
-    <h2>上传凭证</h2>
+    <h2>SSO 换票</h2>
     <div class="row" style="align-items:center">
-      <label style="flex:2">选择文件
+      <label style="flex:2">上传文件（SSO / CPA / ZIP）
         <input type="file" id="upload_files" multiple
           accept=".txt,.json,.zip,text/plain,application/json,application/zip"
           style="padding:8px;min-width:0;width:100%"/>
       </label>
-      <button class="btn primary" type="button" id="btn_upload" onclick="uploadCredentials()">⬆ 上传并处理</button>
+      <button class="btn primary" type="button" id="btn_upload" onclick="uploadCredentials()">🔄 SSO 换票</button>
     </div>
     <div class="muted" style="margin-top:10px;font-size:12px;line-height:1.55">
-      支持：SSO 文本（<code>email----password----sso</code>）、CPA JSON（<code>xai-*.json</code> / <code>all.json</code>）、ZIP 包。
-      SSO 会入队换票；CPA 直接入库。完成后点上方「下载 CPA / Sub2」取新凭证。
+      用已有 <strong>SSO</strong> 换 OAuth 凭证（不重新注册）。支持：SSO 文本（<code>email----password----sso</code>）、CPA JSON、ZIP。
+      SSO 入队换票；CPA 直接入库。完成后点上方「下载 CPA / Sub2」。
     </div>
     <div class="muted" style="margin-top:8px;font-size:12px;display:none" id="upload_hint"></div>
   </div>
@@ -1892,23 +1892,23 @@ function setUploadHint(text){
 async function uploadCredentials(){
   const input=document.getElementById('upload_files');
   if(!input || !input.files || !input.files.length){
-    toast('请先选择要上传的文件');
+    toast('请先选择要换票的文件（SSO / CPA / ZIP）');
     return;
   }
   const fd=new FormData();
   for(const f of input.files){ fd.append('files', f); }
   const btn=document.getElementById('btn_upload');
   if(btn) btn.disabled=true;
-  setUploadHint('上传处理中…');
+  setUploadHint('SSO 换票处理中…');
   try{
     const r=await fetch('/api/cpa/upload',{method:'POST',body:fd,credentials:'same-origin'});
     const j=await r.json().catch(()=>({}));
     if(!r.ok || j.ok===false){
       throw new Error(j.error||j.message||('HTTP '+r.status));
     }
-    const msg=j.message||(`入队 ${j.queued||0} · 入库 ${j.saved||0}`);
+    const msg=j.message||(`换票入队 ${j.queued||0} · 入库 ${j.saved||0}`);
     toast(msg);
-    let hint=`SSO 入队换票: ${j.queued||0} · CPA 直接入库: ${j.saved||0} · 跳过: ${j.skipped||0}`;
+    let hint=`SSO 换票入队: ${j.queued||0} · CPA 入库: ${j.saved||0} · 跳过: ${j.skipped||0}`;
     if(j.errors && j.errors.length){
       hint += ' · 问题: '+j.errors.slice(0,3).join('；');
     }
@@ -1921,8 +1921,8 @@ async function uploadCredentials(){
     input.value='';
     poll();
   }catch(e){
-    toast('上传失败: '+e.message);
-    setUploadHint('上传失败: '+e.message);
+    toast('SSO 换票失败: '+e.message);
+    setUploadHint('SSO 换票失败: '+e.message);
   }finally{
     if(btn) btn.disabled=false;
   }
@@ -2603,7 +2603,7 @@ def api_cpa_upload():
     errors = result.get("errors") or []
 
     log_line(
-        f"[UPLOAD] files={len(files)} · SSO入队={queued} · CPA入库={saved} · 跳过={skipped}"
+        f"[SSO换票] files={len(files)} · 入队={queued} · CPA入库={saved} · 跳过={skipped}"
     )
     if not queued and not saved:
         return (
@@ -2614,7 +2614,7 @@ def api_cpa_upload():
                     "saved": saved,
                     "skipped": skipped,
                     "errors": errors,
-                    "error": "未识别到可用凭证："
+                    "error": "未识别到可用 SSO/CPA："
                     + ("；".join(errors[:3]) if errors else "格式不支持"),
                 }
             ),
@@ -2623,14 +2623,14 @@ def api_cpa_upload():
 
     parts = []
     if queued:
-        parts.append(f"SSO 入队换票 {queued}")
+        parts.append(f"SSO 换票入队 {queued}")
     if saved:
         parts.append(f"CPA 入库 {saved}")
     if skipped:
         parts.append(f"跳过 {skipped}")
-    msg = "，".join(parts) if parts else "处理完成"
+    msg = "，".join(parts) if parts else "SSO 换票完成"
     if queued:
-        msg += "；换票完成后下载 CPA / Sub2"
+        msg += "；完成后下载 CPA / Sub2"
     elif saved:
         msg += "；可直接下载 CPA / Sub2"
 
