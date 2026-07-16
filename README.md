@@ -153,6 +153,12 @@ grok-register-win/
 
 ## 更新日志
 
+### v1.0.8（2026-07-16）
+- 单账号整轮硬超时默认 **5 分钟**（`round_timeout_sec` / `ROUND_TIMEOUT_SEC`）：卡住自动杀进程并进入下一轮
+- 已注册成功后若在后续步骤超时，仍记为成功（避免白注册）
+- 每轮结束扫描新账号文件并入队 CPA，降低漏转换
+- 面板不再把 `config.json` 的 `register_count` 强行改成 1（用环境变量控制单轮）
+
 ### v1.0.7（2026-07-16）
 - 新增「下载 Sub2」：从已转换 CPA 现场映射为 Sub2API 官方导入包（`type=sub2api-data` / `version=1`）
 - 主页三种产物并列：SSO TXT、CPA ZIP、Sub2 ZIP（不重跑注册/换票）
@@ -161,7 +167,6 @@ grok-register-win/
 - Sub2 按钮样式与 SSO/CPA 同为渐变实心按钮
 - 启动注册区增加网络提示（日本节点更稳）；邮箱区空 hint 自动隐藏；README FAQ 补充节点建议
 - 仓库横幅更新：卖点改为「SSO / CPA / Sub2 多格式导出」
-- 单轮硬超时默认 5 分钟（`round_timeout_sec` / `ROUND_TIMEOUT_SEC`）：卡住杀进程并自动进入下一轮
 
 ### v1.0.6（2026-07-16）
 - 修复 CPA 转换在中文路径下失败：curl_cffi 无法处理非 ASCII CA 证书路径，启动时自动复制到 `%TEMP%`
