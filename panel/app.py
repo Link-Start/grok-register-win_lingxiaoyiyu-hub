@@ -551,8 +551,57 @@ def _extract_cpa_entries_from_obj(obj: object) -> List[dict]:
     return out
 
 
+def _cpa_email_key(email: str) -> str:
+    return cpa_safe_filename(str(email or "").strip() or "unknown")
+
+
+def find_cpa_files_for_email(email: str) -> List[Path]:
+    """All xai-{email}.json and xai-{email}-*.json variants."""
+    key = _cpa_email_key(email)
+    if not key or key == "unknown":
+        return []
+    out: List[Path] = []
+    for p in CPA_DIR.glob("xai-*.json"):
+        stem = p.stem  # xai-email or xai-email-fp
+        body = stem[4:] if stem.lower().startswith("xai-") else stem
+        if body == key or body.startswith(key + "-"):
+            out.append(p)
+    return out
+
+
+def find_cpa_files_for_sso(sso: str) -> List[Path]:
+    """CPA files whose stored sso fingerprint matches."""
+    sso = normalize_sso(sso)
+    if not sso:
+        return []
+    fp = sso_fingerprint(sso)
+    out: List[Path] = []
+    for p in list_cpa_files():
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            old_sso = normalize_sso(str(obj.get("sso") or ""))
+            if old_sso and sso_fingerprint(old_sso) == fp:
+                out.append(p)
+        except Exception:
+            continue
+    return out
+
+
+def delete_cpa_paths(paths: List[Path], reason: str = "") -> int:
+    n = 0
+    for p in paths:
+        try:
+            if p.exists():
+                p.unlink()
+                n += 1
+                log_line(f"[CPA] 删除 {p.name}" + (f" · {reason}" if reason else ""))
+        except Exception as e:
+            log_line(f"[CPA] 删除失败 {p.name}: {e}")
+    return n
+
+
 def save_cpa_entry_file(entry: dict, source: str = "upload") -> Tuple[bool, str]:
-    """Write one CPA-like OAuth JSON into data/cpa/. Returns (ok, filename|error)."""
+    """Write one CPA OAuth JSON. Success: keep single xai-{email}.json (dedupe)."""
     if not _looks_like_cpa_entry(entry):
         return False, "not a CPA oauth entry"
     email = str(entry.get("email") or "").strip() or "unknown"
@@ -566,20 +615,18 @@ def save_cpa_entry_file(entry: dict, source: str = "upload") -> Tuple[bool, str]
     entry["_source"] = source
     if sso:
         entry["sso"] = sso
-    fname = f"xai-{cpa_safe_filename(email)}.json"
+
+    # Always canonical name; remove other variants for same email (dedupe on success)
+    fname = f"xai-{_cpa_email_key(email)}.json"
     path = CPA_DIR / fname
-    if path.exists() and sso:
-        try:
-            old = json.loads(path.read_text(encoding="utf-8"))
-            old_fp = sso_fingerprint(normalize_sso(old.get("sso") or ""))
-        except Exception:
-            old_fp = ""
-        if old_fp and old_fp != fp:
-            fname = f"xai-{cpa_safe_filename(email)}-{fp[:8]}.json"
-            path = CPA_DIR / fname
+    keep = {path.resolve()}
+    extras = [p for p in find_cpa_files_for_email(email) if p.resolve() not in keep]
     path.write_text(
         json.dumps(entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    if extras:
+        delete_cpa_paths(extras, reason="换票/入库成功去重")
+
     if sso:
         save_cpa_index_item(
             fp,
@@ -753,6 +800,15 @@ def _cpa_worker_loop():
         email = item.get("email") or ""
         sso = item.get("sso") or ""
         fp = item.get("fp") or sso_fingerprint(sso)
+        source = str(item.get("source") or "")
+        # Snapshot existing files for this sso/email (duplicate / stale cleanup)
+        existing = []
+        seen_paths: Set[str] = set()
+        for p in find_cpa_files_for_sso(sso) + find_cpa_files_for_email(email):
+            key = str(p.resolve())
+            if key not in seen_paths:
+                seen_paths.add(key)
+                existing.append(p)
         with _cpa_lock:
             _cpa_state["running"] = True
             _cpa_state["pending"] = max(0, int(_cpa_state.get("pending") or 0) - 1)
@@ -764,44 +820,29 @@ def _cpa_worker_loop():
             if item.get("password") and not entry.get("password"):
                 entry["password"] = item["password"]
             entry["_source"] = "grok-register-auto-cpa"
-            entry["_source_file"] = item.get("source") or ""
+            entry["_source_file"] = source
             email_out = entry.get("email") or email or "unknown"
-            fname = f"xai-{cpa_safe_filename(email_out)}.json"
-            path = CPA_DIR / fname
-            if path.exists():
-                try:
-                    old = json.loads(path.read_text(encoding="utf-8"))
-                    old_fp = sso_fingerprint(normalize_sso(old.get("sso") or ""))
-                except Exception:
-                    old_fp = ""
-                if old_fp and old_fp != fp:
-                    fname = f"xai-{cpa_safe_filename(email_out)}-{fp[:8]}.json"
-                    path = CPA_DIR / fname
-            path.write_text(
-                json.dumps(entry, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            save_cpa_index_item(
-                fp,
-                {
-                    "email": email_out,
-                    "file": fname,
-                    "at": datetime.now().isoformat(timespec="seconds"),
-                    "auth_kind": entry.get("auth_kind"),
-                },
-            )
+            # Success: write canonical file + remove duplicate variants
+            ok, fname = save_cpa_entry_file(entry, source=source or "cpa-worker")
+            if not ok:
+                raise RuntimeError(fname)
             with _cpa_lock:
                 _cpa_done.add(fp)
                 _cpa_inflight.discard(fp)
-                _cpa_state["ok"] = int(_cpa_state.get("ok") or 0) + 1
-                _cpa_state["last_ok_email"] = email_out
-                _cpa_state["last_error"] = ""
-            log_line(f"[CPA] OK {email_out} -> {fname}")
+            log_line(f"[CPA] OK {email_out} -> {fname}（成功去重只留一份）")
         except Exception as e:
             err = str(e)
             with _cpa_lock:
                 _cpa_inflight.discard(fp)
                 _cpa_state["fail"] = int(_cpa_state.get("fail") or 0) + 1
                 _cpa_state["last_error"] = err
+            # Fail: delete existing duplicate/stale CPA for this sso/email
+            deleted = delete_cpa_paths(
+                existing, reason=f"换票失败清理 · {err[:80]}"
+            )
+            if deleted:
+                with _cpa_lock:
+                    _cpa_done.discard(fp)
             try:
                 with open(CPA_FAILED_PATH, "a", encoding="utf-8") as f:
                     f.write(
@@ -811,6 +852,7 @@ def _cpa_worker_loop():
                                 "email": email,
                                 "fp": fp,
                                 "error": err,
+                                "deleted_files": deleted,
                             },
                             ensure_ascii=False,
                         )
@@ -818,7 +860,10 @@ def _cpa_worker_loop():
                     )
             except Exception:
                 pass
-            log_line(f"[CPA] FAIL {email or fp[:12]}: {err}")
+            log_line(
+                f"[CPA] FAIL {email or fp[:12]}: {err}"
+                + (f" · 已删除旧凭证 {deleted} 个" if deleted else "")
+            )
         finally:
             with _cpa_lock:
                 _cpa_state["running"] = not _cpa_q.empty()
