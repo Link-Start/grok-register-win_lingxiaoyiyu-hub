@@ -651,11 +651,7 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
             c.get("cloudflare_path_messages") or "/api/mails"
         ).strip(),
         "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
-        "hint": (
-            "内置仅 Tempmailer（bluenode.cc 等）。"
-            "InboxKitten 域名已被 xAI 拒绝，已从选项中移除。"
-            "自定义：对接自建临时邮箱 API（兼容 cloudflare_temp_email）。"
-        ),
+        "hint": "",
     }
 
 
