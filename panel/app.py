@@ -497,6 +497,35 @@ def enqueue_missing_accounts(limit: int = 500) -> int:
     return n
 
 
+def enqueue_all_sso_exchange(limit: int = 1000, force: bool = True) -> dict:
+    """Queue every local SSO for OAuth exchange (try all; expiry unknown).
+
+    Returns counts: queued / skipped / total.
+    """
+    queued = 0
+    skipped = 0
+    total = 0
+    for acc in unique_accounts():
+        if total >= limit:
+            break
+        sso = (acc.get("sso") or "").strip()
+        if not sso:
+            continue
+        total += 1
+        ok, reason = enqueue_cpa_convert(
+            email=acc.get("email") or "",
+            sso=sso,
+            password=acc.get("password") or "",
+            source=acc.get("source") or "one-click-refresh",
+            force=force,
+        )
+        if ok:
+            queued += 1
+        else:
+            skipped += 1
+    return {"queued": queued, "skipped": skipped, "total": total}
+
+
 def _looks_like_cpa_entry(obj: object) -> bool:
     if not isinstance(obj, dict):
         return False
@@ -1713,12 +1742,16 @@ INDEX_HTML = r"""
     <div style="padding:14px 14px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
       <h2 style="margin:0">账号文件</h2>
       <div class="actions" style="margin:0">
+        <button class="btn primary" type="button" onclick="refreshAllSso()" title="对账号文件里全部 SSO 尝试换票（无法预知是否过期）">🔄 一键换票</button>
         <button class="btn" type="button" onclick="toggleSelectAllFiles(true)">全选</button>
         <button class="btn" type="button" onclick="toggleSelectAllFiles(false)">取消全选</button>
         <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
       </div>
     </div>
-    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选已下载/不需要的 accounts_*.txt，删除后不会再出现在「下载 SSO」合并结果里。</div>
+    <div class="muted" style="padding:8px 14px 0;font-size:12px">
+      勾选已下载/不需要的 accounts_*.txt，删除后不会再出现在「下载 SSO」合并结果里。
+      <strong>一键换票</strong>：无法预知 SSO 是否过期，会对全部账号尝试换票；成功更新 CPA，失败清理对应旧凭证。
+    </div>
     {% if files %}
     <table>
       <thead>
@@ -1881,6 +1914,16 @@ async function backfillCpa(){
     toast(j.message||('已入队 '+j.queued));
     poll();
   }catch(e){toast('补转失败: '+e.message)}
+}
+async function refreshAllSso(){
+  if(!confirm('对账号文件里的全部 SSO 尝试换票？\\n无法预知是否过期：成功则更新 CPA，失败则删除对应旧凭证。')){
+    return;
+  }
+  try{
+    const j=await api('/api/cpa/refresh-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:1000})});
+    toast(j.message||('已入队换票 '+j.queued));
+    poll();
+  }catch(e){toast('一键换票失败: '+e.message)}
 }
 function setUploadHint(text){
   const el=document.getElementById('upload_hint');
@@ -2578,6 +2621,63 @@ def api_cpa_backfill():
     n = enqueue_missing_accounts(limit=limit)
     log_line(f"[CPA] 手动补转入队: {n}")
     return jsonify({"ok": True, "queued": n, "message": f"已入队 {n} 个待转换 SSO"})
+
+
+@app.post("/api/cpa/refresh-all")
+def api_cpa_refresh_all():
+    """One-click: try SSO→OAuth for every account in accounts_*.txt.
+
+    SSO expiry is unknown — we attempt all. Success updates CPA; failure
+    deletes stale CPA for that sso/email (see worker policy).
+    """
+    need = require_login()
+    if need:
+        return need
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        limit = int(data.get("limit") or 1000)
+    except Exception:
+        limit = 1000
+    limit = max(1, min(limit, 2000))
+    if not _CPA_CORE_OK:
+        return jsonify({"ok": False, "error": f"core unavailable: {_CPA_CORE_ERR}"}), 500
+
+    stats = enqueue_all_sso_exchange(limit=limit, force=True)
+    queued = int(stats.get("queued") or 0)
+    total = int(stats.get("total") or 0)
+    skipped = int(stats.get("skipped") or 0)
+    log_line(
+        f"[一键换票] 账号SSO={total} · 入队={queued} · 跳过={skipped}"
+    )
+    if total <= 0:
+        return jsonify(
+            {
+                "ok": False,
+                "queued": 0,
+                "total": 0,
+                "error": "账号文件里没有可用 SSO（先注册或上传 accounts 文本）",
+            }
+        ), 400
+    if queued <= 0:
+        return jsonify(
+            {
+                "ok": False,
+                "queued": 0,
+                "total": total,
+                "skipped": skipped,
+                "error": "没有新任务入队（可能均在队列中）",
+            }
+        ), 400
+    return jsonify(
+        {
+            "ok": True,
+            "queued": queued,
+            "total": total,
+            "skipped": skipped,
+            "message": f"已对 {total} 个 SSO 中的 {queued} 个入队换票（无法预知是否过期，成功更新 / 失败清理）",
+            "cpa": cpa_stats(),
+        }
+    )
 
 
 @app.post("/api/cpa/upload")
