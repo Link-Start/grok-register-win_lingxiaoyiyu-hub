@@ -101,6 +101,8 @@ DEFAULT_CONFIG = {
     "allow_proxy_fallback": False,
     "enable_nsfw": True,
     "register_count": 1,
+    # 单账号整轮硬超时（秒）；超时后跳过该账号进入下一个（面板也会在同超时后杀进程）
+    "round_timeout_sec": 300,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
     "grok2api_auto_add_local": True,
     "grok2api_local_token_file": "",
@@ -964,7 +966,24 @@ def http_post(url, **kwargs):
 
 def raise_if_cancelled(cancel_callback=None):
     if cancel_callback and cancel_callback():
-        raise RegistrationCancelled("鐢ㄦ埛鍋滄娉ㄥ唽")
+        raise RegistrationCancelled("用户停止注册")
+
+
+def get_round_timeout_sec():
+    """Per-account wall-clock timeout in seconds (default 300)."""
+    for key in ("ROUND_TIMEOUT_SEC", "ROUND_TIMEOUT"):
+        raw = str(os.environ.get(key, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            return max(60, min(int(float(raw)), 3600))
+        except Exception:
+            pass
+    try:
+        raw = config.get("round_timeout_sec", 300)
+        return max(60, min(int(float(raw)), 3600))
+    except Exception:
+        return 300
 
 
 def sleep_with_cancel(seconds, cancel_callback=None):
@@ -4133,10 +4152,16 @@ class GrokRegisterGUI:
             i = 0
             retry_count_for_slot = 0
             max_slot_retry = 3
+            round_timeout = get_round_timeout_sec()
+            self.log(f"[*] 单账号硬超时: {round_timeout}s")
             while i < count:
                 if self.should_stop():
                     break
-                self.log(f"--- 开始第 {i + 1}/{count} 个账号 ---")
+                account_deadline = time.time() + round_timeout
+                cancel_cb = _make_account_cancel(
+                    self.should_stop, account_deadline, round_timeout
+                )
+                self.log(f"--- 开始第 {i + 1}/{count} 个账号 · 超时 {round_timeout}s ---")
                 try:
                     email = ""
                     dev_token = ""
@@ -4150,11 +4175,11 @@ class GrokRegisterGUI:
                                 f" · 邮箱源={get_email_provider()})"
                             )
                             open_signup_page(
-                                log_callback=self.log, cancel_callback=self.should_stop
+                                log_callback=self.log, cancel_callback=cancel_cb
                             )
                             self.log("[*] 2. 创建邮箱并提交")
                             email, dev_token = fill_email_and_submit(
-                                log_callback=self.log, cancel_callback=self.should_stop
+                                log_callback=self.log, cancel_callback=cancel_cb
                             )
                             self.log(f"[*] 邮箱: {email}")
                             self.log(f"[Debug] 邮箱credential(jwt): {dev_token}")
@@ -4174,12 +4199,14 @@ class GrokRegisterGUI:
                                 email,
                                 dev_token,
                                 log_callback=self.log,
-                                cancel_callback=self.should_stop,
+                                cancel_callback=cancel_cb,
                             )
                             mail_ok = True
                             break
                         except Exception as mail_exc:
                             msg = str(mail_exc)
+                            if "单账号超时" in msg:
+                                raise
                             if is_mail_related_error(mail_exc) and mail_try < max_mail_retry:
                                 self.log(
                                     f"[!] 邮箱/验证码失败，自动切换备用源并换邮箱重试: {msg}"
@@ -4189,7 +4216,7 @@ class GrokRegisterGUI:
                                         log_callback=self.log, reason=msg[:120]
                                     )
                                 restart_browser(log_callback=self.log)
-                                sleep_with_cancel(1, self.should_stop)
+                                sleep_with_cancel(1, cancel_cb)
                                 continue
                             raise
 
@@ -4198,12 +4225,12 @@ class GrokRegisterGUI:
                     self.log(f"[*] 验证码: {code}")
                     self.log("[*] 4. 填写资料")
                     profile = fill_profile_and_submit(
-                        log_callback=self.log, cancel_callback=self.should_stop
+                        log_callback=self.log, cancel_callback=cancel_cb
                     )
                     self.log(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                     self.log("[*] 5. 等待落到 grok.com 并提取 sso cookie（优先 grok.com 域）")
                     sso = wait_for_sso_cookie(
-                        log_callback=self.log, cancel_callback=self.should_stop
+                        log_callback=self.log, cancel_callback=cancel_cb
                     )
                     if config.get("enable_nsfw", True):
                         self.log("[*] 6. 开启 NSFW")
@@ -4292,17 +4319,32 @@ def cli_log(message):
         print(f"[{timestamp}] {message}".encode("ascii", "replace").decode("ascii"), flush=True)
 
 
+def _make_account_cancel(stop_callback, deadline, timeout_sec):
+    """User stop → RegistrationCancelled; account wall-clock → Exception (skip to next)."""
+
+    def cancel():
+        if stop_callback and stop_callback():
+            return True
+        if deadline and time.time() >= deadline:
+            raise Exception(f"单账号超时（{timeout_sec}s），跳过进入下一轮")
+        return False
+
+    return cancel
+
+
 def run_registration_cli(count):
     controller = CliStopController()
     success_count = 0
     fail_count = 0
     retry_count_for_slot = 0
     max_slot_retry = 3
+    round_timeout = get_round_timeout_sec()
     accounts_output_file = os.path.join(
         os.path.dirname(__file__),
         f"accounts_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
     )
     cli_log(f"[*] 终端模式启动，目标数量: {count}")
+    cli_log(f"[*] 单账号硬超时: {round_timeout}s")
     cli_log(f"[*] 成功账号将实时保存到: {accounts_output_file}")
     try:
         start_browser(log_callback=cli_log)
@@ -4311,7 +4353,11 @@ def run_registration_cli(count):
         while i < count:
             if controller.should_stop():
                 break
-            cli_log(f"--- 开始第 {i + 1}/{count} 个账号 ---")
+            account_deadline = time.time() + round_timeout
+            cancel_cb = _make_account_cancel(
+                controller.should_stop, account_deadline, round_timeout
+            )
+            cli_log(f"--- 开始第 {i + 1}/{count} 个账号 · 超时 {round_timeout}s ---")
             try:
                 email = ""
                 dev_token = ""
@@ -4325,11 +4371,11 @@ def run_registration_cli(count):
                             f" · 邮箱源={get_email_provider()})"
                         )
                         open_signup_page(
-                            log_callback=cli_log, cancel_callback=controller.should_stop
+                            log_callback=cli_log, cancel_callback=cancel_cb
                         )
                         cli_log("[*] 2. 创建邮箱并提交")
                         email, dev_token = fill_email_and_submit(
-                            log_callback=cli_log, cancel_callback=controller.should_stop
+                            log_callback=cli_log, cancel_callback=cancel_cb
                         )
                         cli_log(f"[*] 邮箱: {email}")
                         cli_log(f"[Debug] 邮箱credential(jwt): {dev_token}")
@@ -4349,12 +4395,14 @@ def run_registration_cli(count):
                             email,
                             dev_token,
                             log_callback=cli_log,
-                            cancel_callback=controller.should_stop,
+                            cancel_callback=cancel_cb,
                         )
                         mail_ok = True
                         break
                     except Exception as mail_exc:
                         msg = str(mail_exc)
+                        if "单账号超时" in msg:
+                            raise
                         if is_mail_related_error(mail_exc) and mail_try < max_mail_retry:
                             cli_log(
                                 f"[!] 邮箱/验证码失败，自动切换备用源并换邮箱重试: {msg}"
@@ -4364,7 +4412,7 @@ def run_registration_cli(count):
                                     log_callback=cli_log, reason=msg[:120]
                                 )
                             restart_browser(log_callback=cli_log)
-                            sleep_with_cancel(1, controller.should_stop)
+                            sleep_with_cancel(1, cancel_cb)
                             continue
                         raise
 
@@ -4373,12 +4421,12 @@ def run_registration_cli(count):
                 cli_log(f"[*] 验证码: {code}")
                 cli_log("[*] 4. 填写资料")
                 profile = fill_profile_and_submit(
-                    log_callback=cli_log, cancel_callback=controller.should_stop
+                    log_callback=cli_log, cancel_callback=cancel_cb
                 )
                 cli_log(f"[*] 资料已填: {profile.get('given_name')} {profile.get('family_name')}")
                 cli_log("[*] 5. 等待落到 grok.com 并提取 sso cookie（优先 grok.com 域）")
                 sso = wait_for_sso_cookie(
-                    log_callback=cli_log, cancel_callback=controller.should_stop
+                    log_callback=cli_log, cancel_callback=cancel_cb
                 )
                 if config.get("enable_nsfw", True):
                     cli_log("[*] 6. 开启 NSFW")

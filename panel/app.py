@@ -81,6 +81,8 @@ SSO2CPA_PATH = Path(
 ).resolve()
 AUTO_CPA = os.environ.get("AUTO_CPA", "1").strip() not in ("0", "false", "False", "no")
 CPA_DELAY = float(os.environ.get("CPA_DELAY", "1.0"))
+# Hard wall-clock per register round (one account). Stuck process is killed, next round starts.
+DEFAULT_ROUND_TIMEOUT_SEC = 300
 # Optional: talk to local Clash Meta external-controller for node list.
 # Default: external Clash managed by user; node UI is best-effort.
 ENABLE_CLASH_UI = os.environ.get("ENABLE_CLASH_UI", "1").strip() not in (
@@ -894,8 +896,90 @@ def _update_stats_from_log(line: str):
             _job["fail"] = int(_job.get("fail") or 0) + 1
 
 
+def resolve_round_timeout_sec(cfg: Optional[dict] = None) -> int:
+    """Per-account wall-clock timeout (seconds). Default 300; clamp 60..3600."""
+    for key in ("ROUND_TIMEOUT_SEC", "ROUND_TIMEOUT"):
+        raw = os.environ.get(key, "").strip()
+        if not raw:
+            continue
+        try:
+            return max(60, min(int(float(raw)), 3600))
+        except Exception:
+            pass
+    try:
+        c = cfg if isinstance(cfg, dict) else load_config()
+        raw_cfg = c.get("round_timeout_sec", DEFAULT_ROUND_TIMEOUT_SEC)
+        return max(60, min(int(float(raw_cfg)), 3600))
+    except Exception:
+        return DEFAULT_ROUND_TIMEOUT_SEC
+
+
+def _terminate_register_proc(proc: Optional[subprocess.Popen]) -> None:
+    """Kill register CLI and its browser children (Windows process tree)."""
+    if proc is None:
+        return
+    pid = getattr(proc, "pid", None)
+    try:
+        if os.name == "nt" and pid:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        else:
+            try:
+                proc.send_signal(signal.SIGINT)
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+                return
+            except Exception:
+                pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
+def _cleanup_browser_leftovers() -> None:
+    """Best-effort cleanup of temp browser profiles (Windows/Linux)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/FI", "WINDOWTITLE eq *autoPortData*", "/T"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        else:
+            subprocess.run(
+                ["pkill", "-f", "chromium.*autoPortData"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+    except Exception:
+        pass
+
+
 def _run_one_round(round_no: int, total: int) -> bool:
-    """Run register_count=1 once. Return True if success detected."""
+    """Run register_count=1 once. Return True if success detected.
+
+    Enforces round_timeout_sec (default 300s): if the CLI hangs (Turnstile /
+    proxy / browser dead), kill the process tree and let job_worker start the
+    next account instead of blocking forever.
+    """
     global _proc
     cfg = load_config()
     cfg["register_count"] = 1
@@ -912,9 +996,12 @@ def _run_one_round(round_no: int, total: int) -> bool:
     cfg["browser_engine"] = engine
     save_config(cfg)
 
+    round_timeout = resolve_round_timeout_sec(cfg)
+
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["GROK_BROWSER_ENGINE"] = engine
+    env["ROUND_TIMEOUT_SEC"] = str(round_timeout)
     # Windows / local: use system Chrome/Edge; allow override (chromium engine only)
     if engine == "chromium":
         if os.name == "nt":
@@ -934,7 +1021,10 @@ def _run_one_round(round_no: int, total: int) -> bool:
 
     log_line(f"=== 第 {round_no}/{total} 轮开始 · 节点 {_job.get('current_node') or '外部Clash'} ===")
     engine_label = "Camoufox 无头" if engine == "camoufox" else "Chromium 有头"
-    log_line(f"[*] proxy={PROXY_URL} engine={engine_label} python={VENV_PYTHON}")
+    log_line(
+        f"[*] proxy={PROXY_URL} engine={engine_label} python={VENV_PYTHON} "
+        f"round_timeout={round_timeout}s"
+    )
     cmd = [
         VENV_PYTHON,
         "-u",
@@ -960,6 +1050,8 @@ def _run_one_round(round_no: int, total: int) -> bool:
 
     with _job_lock:
         _job["pid"] = _proc.pid
+        _job["round_timeout_sec"] = round_timeout
+        _job["round_deadline"] = time.time() + round_timeout
 
     # send start
     try:
@@ -971,20 +1063,71 @@ def _run_one_round(round_no: int, total: int) -> bool:
 
     success = False
     failed = False
-    assert _proc.stdout is not None
-    for line in _proc.stdout:
+    timed_out = False
+    stopped = False
+    line_q: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _stdout_reader() -> None:
+        try:
+            assert _proc is not None and _proc.stdout is not None
+            for raw in _proc.stdout:
+                line_q.put(raw)
+        except Exception:
+            pass
+        finally:
+            line_q.put(None)
+
+    reader = threading.Thread(target=_stdout_reader, name=f"round-{round_no}-stdout", daemon=True)
+    reader.start()
+
+    deadline = time.time() + round_timeout
+    while True:
         if _job.get("stop"):
+            stopped = True
             log_line("[!] 收到停止指令，终止当前轮")
-            try:
-                _proc.send_signal(signal.SIGINT)
-            except Exception:
-                pass
-            try:
-                _proc.kill()
-            except Exception:
-                pass
+            _terminate_register_proc(_proc)
             break
-        line = line.rstrip("\n")
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            timed_out = True
+            log_line(
+                f"[!] 第 {round_no} 轮超时（{round_timeout}s），终止进程并进入下一轮"
+            )
+            with _job_lock:
+                _job["last_error"] = f"round {round_no} timeout after {round_timeout}s"
+            _terminate_register_proc(_proc)
+            break
+
+        try:
+            raw = line_q.get(timeout=min(1.0, max(0.05, remaining)))
+        except queue.Empty:
+            if _proc.poll() is not None:
+                # process exited; drain residual lines briefly
+                drain_deadline = time.time() + 1.0
+                while time.time() < drain_deadline:
+                    try:
+                        raw = line_q.get(timeout=0.1)
+                    except queue.Empty:
+                        break
+                    if raw is None:
+                        break
+                    line = raw.rstrip("\n")
+                    if not line:
+                        continue
+                    if _is_key_log(line):
+                        log_line(_truncate_line(_strip_inner_timestamp(line)))
+                    if "注册成功" in line or "[+] 注册成功" in line:
+                        success = True
+                    if "注册失败" in line or "[-] 注册失败" in line:
+                        failed = True
+                break
+            continue
+
+        if raw is None:
+            break
+
+        line = raw.rstrip("\n")
         if not line:
             continue
         # 只有关键日志才写入面板显示，但状态检测仍基于原始内容
@@ -998,36 +1141,25 @@ def _run_one_round(round_no: int, total: int) -> bool:
             # final summary line often has both
             pass
 
+    if _proc is not None and _proc.poll() is None:
+        _terminate_register_proc(_proc)
     try:
-        _proc.wait(timeout=30)
+        if _proc is not None:
+            _proc.wait(timeout=15)
     except Exception:
-        try:
-            _proc.kill()
-        except Exception:
-            pass
+        _terminate_register_proc(_proc)
+
     with _job_lock:
         _job["pid"] = None
+        _job.pop("round_deadline", None)
     _proc = None
+    _cleanup_browser_leftovers()
 
-    # best-effort cleanup of temp browser profiles (Windows/Linux)
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/F", "/FI", "WINDOWTITLE eq *autoPortData*", "/T"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-        else:
-            subprocess.run(
-                ["pkill", "-f", "chromium.*autoPortData"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-    except Exception:
-        pass
-
+    if stopped:
+        return False
+    if timed_out:
+        log_line(f"[-] 第 {round_no} 轮因超时记为失败")
+        return False
     if success and not failed:
         return True
     if success:
@@ -1151,35 +1283,8 @@ def stop_job() -> Tuple[bool, str]:
         _job["stop"] = True
     log_line("[!] 正在停止…")
     p = _proc
-    if p and p.poll() is None:
-        try:
-            p.send_signal(signal.SIGINT)
-        except Exception:
-            pass
-        try:
-            time.sleep(1)
-            if p.poll() is None:
-                p.kill()
-        except Exception:
-            pass
-    try:
-        if os.name == "nt":
-            # kill register child if still around
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "chrome.exe", "/FI", "MEMUSAGE gt 1"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        else:
-            subprocess.run(
-                ["pkill", "-f", "grok_register_ttk.py"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-    except Exception:
-        pass
+    _terminate_register_proc(p)
+    _cleanup_browser_leftovers()
     return True, "已发送停止"
 
 
