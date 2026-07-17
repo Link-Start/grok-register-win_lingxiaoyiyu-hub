@@ -624,21 +624,20 @@ def load_config() -> dict:
 def email_config_public(cfg: Optional[dict] = None) -> dict:
     """Email settings for panel UI (custom maps to cloudflare_* backend)."""
     c = cfg if isinstance(cfg, dict) else load_config()
-    provider = str(c.get("email_provider") or "tempmailer").strip().lower()
-    # inboxkitten.com 已被 xAI 拒绝，旧配置自动映射为 tempmailer
-    if provider in ("inboxkitten", "inbox_kitten"):
-        provider = "tempmailer"
-    if provider == "cloudflare":
-        ui_provider = "custom"
-    elif provider == "tempmailer":
-        ui_provider = "tempmailer"
-    else:
-        # unknown / unpaid providers -> show as custom if base set, else tempmailer
-        ui_provider = "custom" if c.get("cloudflare_api_base") else "tempmailer"
+    provider = str(c.get("email_provider") or "cloudflare").strip().lower()
+    # 公共 Tempmailer / inboxkitten 已因滥用拒收 xAI，旧配置统一引导为自定义
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
+        provider = "cloudflare"
+    has_api = bool(str(c.get("cloudflare_api_base") or "").strip())
+    hint = ""
+    if not has_api:
+        hint = (
+            "内置公共临时邮已移除（滥用后拒收 xAI 验证码）。"
+            "请配置自建临时邮 API（兼容 cloudflare_temp_email）后再注册。"
+        )
     return {
-        "provider": ui_provider,
+        "provider": "custom",
         "email_failover": bool(c.get("email_failover", True)),
-        "tempmailer_domain": str(c.get("tempmailer_domain") or c.get("defaultDomains") or "").strip(),
         "custom_api_base": str(c.get("cloudflare_api_base") or "").strip(),
         "custom_api_key": str(c.get("cloudflare_api_key") or "").strip(),
         "custom_auth_mode": (
@@ -655,62 +654,54 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
             c.get("cloudflare_path_messages") or "/api/mails"
         ).strip(),
         "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
-        "hint": "",
+        "hint": hint,
     }
 
 
 def apply_email_config_from_ui(data: dict) -> dict:
     """Merge panel email form into config.json and return public view."""
     cfg = load_config()
-    provider = str(data.get("provider") or "tempmailer").strip().lower()
-    if provider in ("inboxkitten", "inbox_kitten"):
-        provider = "tempmailer"
-    if provider not in ("tempmailer", "custom"):
-        raise ValueError("provider 必须是 tempmailer / custom")
+    provider = str(data.get("provider") or "custom").strip().lower()
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
+        raise ValueError(
+            "内置公共临时邮已移除（滥用后拒收 xAI 验证码）。请使用「自定义」自建临时邮 API。"
+        )
+    if provider not in ("custom", "cloudflare"):
+        raise ValueError("当前仅支持自定义临时邮 API（provider=custom）")
 
     cfg["email_failover"] = bool(data.get("email_failover", True))
 
-    if provider == "tempmailer":
-        cfg["email_provider"] = "tempmailer"
-        domain = str(data.get("tempmailer_domain") or cfg.get("tempmailer_domain") or "bluenode.cc").strip()
-        cfg["tempmailer_domain"] = domain
-        cfg["tempmailer_domains"] = [domain] if domain else cfg.get("tempmailer_domains") or []
-        cfg["defaultDomains"] = domain or cfg.get("defaultDomains") or ""
-        chain = ["tempmailer"]
-        if str(cfg.get("cloudflare_api_base") or "").strip():
-            chain.append("cloudflare")
-        cfg["email_providers"] = chain
+    # custom -> cloudflare backend channel
+    api_base = str(data.get("custom_api_base") or "").strip().rstrip("/")
+    if not api_base:
+        raise ValueError("必须填写自建临时邮 API 根地址")
+    cfg["email_provider"] = "cloudflare"
+    cfg["cloudflare_api_base"] = api_base
+    cfg["cloudflare_api_key"] = str(data.get("custom_api_key") or "").strip()
+    mode = str(data.get("custom_auth_mode") or "x-admin-auth").strip().lower()
+    if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
+        mode = "x-admin-auth"
+    # register: x-api-key / x-admin-auth / query-key / none; anything else + key => Authorization Bearer
+    if mode == "bearer":
+        cfg["cloudflare_auth_mode"] = "auth"
     else:
-        # custom -> cloudflare backend channel
-        api_base = str(data.get("custom_api_base") or "").strip().rstrip("/")
-        if not api_base:
-            raise ValueError("自定义模式必须填写 API 地址 cloudflare_api_base")
-        cfg["email_provider"] = "cloudflare"
-        cfg["cloudflare_api_base"] = api_base
-        cfg["cloudflare_api_key"] = str(data.get("custom_api_key") or "").strip()
-        mode = str(data.get("custom_auth_mode") or "x-admin-auth").strip().lower()
-        if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
-            mode = "x-admin-auth"
-        # register: x-api-key / x-admin-auth / query-key / none; anything else + key => Authorization Bearer
-        if mode == "bearer":
-            cfg["cloudflare_auth_mode"] = "auth"
-        else:
-            cfg["cloudflare_auth_mode"] = mode
-        domain = str(data.get("custom_domain") or "").strip()
-        cfg["defaultDomains"] = domain
-        cfg["cloudflare_path_accounts"] = str(
-            data.get("custom_path_accounts") or "/admin/new_address"
-        ).strip() or "/admin/new_address"
-        cfg["cloudflare_path_messages"] = str(
-            data.get("custom_path_messages") or "/api/mails"
-        ).strip() or "/api/mails"
-        cfg["cloudflare_path_token"] = str(
-            data.get("custom_path_token") or "/api/token"
-        ).strip() or "/api/token"
-        if cfg.get("email_failover"):
-            cfg["email_providers"] = ["cloudflare", "tempmailer"]
-        else:
-            cfg["email_providers"] = ["cloudflare"]
+        cfg["cloudflare_auth_mode"] = mode
+    domain = str(data.get("custom_domain") or "").strip()
+    cfg["defaultDomains"] = domain
+    cfg["cloudflare_path_accounts"] = str(
+        data.get("custom_path_accounts") or "/admin/new_address"
+    ).strip() or "/admin/new_address"
+    cfg["cloudflare_path_messages"] = str(
+        data.get("custom_path_messages") or "/api/mails"
+    ).strip() or "/api/mails"
+    cfg["cloudflare_path_token"] = str(
+        data.get("custom_path_token") or "/api/token"
+    ).strip() or "/api/token"
+    # 清理旧 Tempmailer 配置残留
+    cfg.pop("tempmailer_api_base", None)
+    cfg.pop("tempmailer_domain", None)
+    cfg.pop("tempmailer_domains", None)
+    cfg["email_providers"] = ["cloudflare"]
 
     save_config(cfg)
     return email_config_public(cfg)
@@ -991,7 +982,7 @@ def _run_one_round(round_no: int, total: int) -> bool:
     global PROXY_URL
     PROXY_URL = cfg_run["proxy"]
     os.environ["GROK_PROXY"] = PROXY_URL
-    cfg_run.setdefault("email_provider", "tempmailer")
+    cfg_run.setdefault("email_provider", "cloudflare")
     engine = str(cfg_run.get("browser_engine") or "chromium").strip().lower()
     if engine in ("camoufox", "firefox", "headless", "cfox"):
         engine = "camoufox"
@@ -1042,6 +1033,19 @@ def _run_one_round(round_no: int, total: int) -> bool:
         f"[*] proxy={PROXY_URL} engine={engine_label} python={VENV_PYTHON} "
         f"round_timeout={round_timeout}s"
     )
+
+    # 注册前强制检查邮箱：公共 Tempmailer 已移除
+    try:
+        mail_cfg = load_config()
+        mail_base = str(mail_cfg.get("cloudflare_api_base") or "").strip()
+        mail_prov = str(mail_cfg.get("email_provider") or "").strip().lower()
+        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten") or not mail_base:
+            log_line("[!] 未配置自建临时邮 API：内置公共临时邮已因滥用拒收 xAI 验证码")
+            log_line("[!] 请到面板「邮箱服务」填写自定义 API（兼容 cloudflare_temp_email）后重试")
+            return False
+    except Exception as e:
+        log_line(f"[!] 检查邮箱配置失败: {e}")
+        return False
 
     # Camoufox 首次要下载浏览器二进制，不计入 5 分钟注册超时
     if engine == "camoufox":
@@ -1491,11 +1495,14 @@ INDEX_HTML = r"""
 
   <div class="card">
     <h2>邮箱服务</h2>
+    <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid #5b3b14;background:rgba(180,100,20,.12);border-radius:10px;color:#f0c674">
+      <b>内置公共临时邮已移除。</b>因滥用，Tempmailer 等已暂时拒收 xAI 验证码邮件（提示类似 “emails from xAI are temporarily not accepted”）。
+      请使用自建域名临时邮 API（兼容 <b>cloudflare_temp_email</b>）。
+    </div>
     <div class="row">
       <label>邮箱源
         <select id="email_provider" onchange="onEmailProviderChange()">
-          <option value="tempmailer">Tempmailer（内置免 key）</option>
-          <option value="custom">自定义（自建临时邮 API）</option>
+          <option value="custom">自定义 / 自建临时邮 API</option>
         </select>
       </label>
       <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
@@ -1503,14 +1510,9 @@ INDEX_HTML = r"""
       </label>
       <button class="btn primary" onclick="saveEmailConfig()">保存邮箱设置</button>
     </div>
-    <div class="row" id="email_builtin_extra" style="margin-top:8px">
-      <label id="lbl_temp_domain">Tempmailer 域名
-        <input type="text" id="tempmailer_domain" placeholder="bluenode.cc"/>
-      </label>
-    </div>
-    <div id="email_custom_box" style="display:none;margin-top:10px">
+    <div id="email_custom_box" style="display:block;margin-top:10px">
       <div class="muted" style="font-size:12px;margin-bottom:8px;line-height:1.5">
-        自定义对接自建临时邮箱（兼容 <b>cloudflare_temp_email</b> 一类）：程序调用「创建地址」拿到邮箱+token，再轮询「收信」提取 xAI 验证码。<br/>
+        对接自建临时邮箱：程序调用「创建地址」拿到邮箱+token，再轮询「收信」提取 xAI 验证码。<br/>
         常见管理员创建路径：<code>/admin/new_address</code>，鉴权头：<code>x-admin-auth</code>。
       </div>
       <div class="row">
@@ -1603,26 +1605,17 @@ async function api(url, opt){
   return j;
 }
 function onEmailProviderChange(){
-  const p=document.getElementById('email_provider').value;
   const custom=document.getElementById('email_custom_box');
-  const builtin=document.getElementById('email_builtin_extra');
-  if(p==='custom'){
-    custom.style.display='block';
-    builtin.style.display='none';
-  }else{
-    custom.style.display='none';
-    builtin.style.display='flex';
-  }
+  if(custom) custom.style.display='block';
+  const sel=document.getElementById('email_provider');
+  if(sel) sel.value='custom';
 }
 async function loadEmailConfig(){
   try{
     const j=await api('/api/config/email');
     const e=j.email||{};
-    let prov=e.provider||'tempmailer';
-    if(prov==='inboxkitten') prov='tempmailer';
-    document.getElementById('email_provider').value=prov;
+    document.getElementById('email_provider').value='custom';
     document.getElementById('email_failover').checked=!!e.email_failover;
-    document.getElementById('tempmailer_domain').value=e.tempmailer_domain||'';
     document.getElementById('custom_api_base').value=e.custom_api_base||'';
     document.getElementById('custom_api_key').value=e.custom_api_key||'';
     document.getElementById('custom_auth_mode').value=e.custom_auth_mode||'x-admin-auth';
@@ -1645,9 +1638,8 @@ function setEmailHint(text){
 }
 async function saveEmailConfig(){
   const body={
-    provider: document.getElementById('email_provider').value,
+    provider: 'custom',
     email_failover: document.getElementById('email_failover').checked,
-    tempmailer_domain: document.getElementById('tempmailer_domain').value.trim(),
     custom_api_base: document.getElementById('custom_api_base').value.trim(),
     custom_api_key: document.getElementById('custom_api_key').value,
     custom_auth_mode: document.getElementById('custom_auth_mode').value,
