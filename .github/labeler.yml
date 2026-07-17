@@ -1,0 +1,70 @@
+# Labeler 配置
+# https://github.com/actions/labeler
+
+# 文档相关
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '*.md'
+          - 'docs/**'
+
+# 核心代码
+core:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'grok_register_ttk.py'
+          - 'launcher.py'
+          - 'start.bat'
+
+# 面板
+panel:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'panel/**'
+
+# 库文件
+library:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lib/**'
+
+# 邮箱相关
+email:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lib/mail_providers.py'
+          - 'lib/mailbox_core.py'
+          - 'lib/base_mailbox.py'
+          - 'lib/luckmail/**'
+
+# SSO/CPA 转换
+sso-cpa:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lib/sso2cpa_core.py'
+
+# Camoufox 引擎
+camoufox:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'lib/camoufox_backend.py'
+
+# 配置文件
+configuration:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'config.example.json'
+          - 'requirements.txt'
+          - '.gitignore'
+
+# GitHub 配置
+github-config:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+
+# 依赖
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'requirements.txt'
