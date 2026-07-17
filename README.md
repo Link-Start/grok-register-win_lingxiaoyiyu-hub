@@ -358,18 +358,6 @@ grok-register-win/
 
 ---
 
-## ⭐ Star 历史
-
-<div align="center">
-
-<a href="https://star-history.com/#lingxiaoyiyu-hub/grok-register-win&Date">
-  <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=lingxiaoyiyu-hub/grok-register-win&type=Date" />
-</a>
-
-</div>
-
----
-
 ## License
 
 本项目基于 [MIT License](LICENSE) 发布。若上游组件另有协议，以对应文件为准。
