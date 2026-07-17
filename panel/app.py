@@ -622,38 +622,96 @@ def load_config() -> dict:
 
 
 def email_config_public(cfg: Optional[dict] = None) -> dict:
-    """Email settings for panel UI (custom maps to cloudflare_* backend)."""
+    """Email settings for panel UI (multi-provider dropdown)."""
     c = cfg if isinstance(cfg, dict) else load_config()
-    provider = str(c.get("email_provider") or "cloudflare").strip().lower()
-    # 公共 Tempmailer / inboxkitten 已因滥用拒收 xAI，旧配置统一引导为自定义
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
-        provider = "cloudflare"
-    has_api = bool(str(c.get("cloudflare_api_base") or "").strip())
-    hint = ""
-    if not has_api:
-        hint = (
-            "内置公共临时邮已移除（滥用后拒收 xAI 验证码）。"
-            "请配置自建临时邮 API（兼容 cloudflare_temp_email）后再注册。"
-        )
+    provider = str(c.get("email_provider") or "cfworker").strip().lower()
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom"):
+        provider = "cfworker" if provider != "custom" else "cfworker"
+    if provider == "custom":
+        provider = "cfworker"
+    # alias yyds -> maliapi for UI
+    if provider == "yyds":
+        provider = "maliapi"
+
+    choices = [
+        {"id": "cfworker", "label": "CF Worker / 自建域名"},
+        {"id": "cloudflare", "label": "自定义 cloudflare_temp_email"},
+        {"id": "moemail", "label": "MoeMail (sall.cc)"},
+        {"id": "tempmail_lol", "label": "TempMail.lol（自动生成）"},
+        {"id": "duckmail", "label": "DuckMail"},
+        {"id": "gptmail", "label": "GPTMail"},
+        {"id": "maliapi", "label": "YYDS / MaliAPI"},
+        {"id": "luckmail", "label": "LuckMail（接码/买邮）"},
+        {"id": "skymail", "label": "SkyMail"},
+        {"id": "cloudmail", "label": "CloudMail"},
+        {"id": "freemail", "label": "Freemail 自建"},
+        {"id": "opentrashmail", "label": "OpenTrashMail"},
+        {"id": "laoudo", "label": "Laoudo 固定邮箱"},
+    ]
+    valid = {x["id"] for x in choices}
+    if provider not in valid:
+        provider = "cfworker"
+
+    hint = (
+        "公共 Tempmailer 已移除（滥用后拒收 xAI 验证码）。"
+        "请从下拉框选择邮箱源；自建/CF Worker 通常更稳，公共源可能仍被 xAI 拒绝。"
+    )
     return {
-        "provider": "custom",
+        "provider": provider,
+        "choices": choices,
         "email_failover": bool(c.get("email_failover", True)),
-        "custom_api_base": str(c.get("cloudflare_api_base") or "").strip(),
-        "custom_api_key": str(c.get("cloudflare_api_key") or "").strip(),
+        # generic / cfworker / cloudflare
+        "cfworker_api_url": str(c.get("cfworker_api_url") or c.get("cloudflare_api_base") or "").strip(),
+        "cfworker_admin_token": str(c.get("cfworker_admin_token") or c.get("cloudflare_api_key") or "").strip(),
+        "cfworker_domain": str(c.get("cfworker_domain") or c.get("defaultDomains") or "").strip(),
+        "cfworker_custom_auth": str(c.get("cfworker_custom_auth") or "").strip(),
+        "cfworker_subdomain": str(c.get("cfworker_subdomain") or "").strip(),
+        "custom_api_base": str(c.get("cloudflare_api_base") or c.get("cfworker_api_url") or "").strip(),
+        "custom_api_key": str(c.get("cloudflare_api_key") or c.get("cfworker_admin_token") or "").strip(),
         "custom_auth_mode": (
             "bearer"
             if str(c.get("cloudflare_auth_mode") or "").strip().lower()
             in ("auth", "bearer", "authorization")
             else str(c.get("cloudflare_auth_mode") or "x-admin-auth").strip()
         ),
-        "custom_domain": str(c.get("defaultDomains") or "").strip(),
-        "custom_path_accounts": str(
-            c.get("cloudflare_path_accounts") or "/admin/new_address"
-        ).strip(),
-        "custom_path_messages": str(
-            c.get("cloudflare_path_messages") or "/api/mails"
-        ).strip(),
+        "custom_domain": str(c.get("defaultDomains") or c.get("cfworker_domain") or "").strip(),
+        "custom_path_accounts": str(c.get("cloudflare_path_accounts") or "/admin/new_address").strip(),
+        "custom_path_messages": str(c.get("cloudflare_path_messages") or "/api/mails").strip(),
         "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
+        # providers
+        "moemail_api_url": str(c.get("moemail_api_url") or "https://sall.cc").strip(),
+        "moemail_api_key": str(c.get("moemail_api_key") or "").strip(),
+        "gptmail_base_url": str(c.get("gptmail_base_url") or "https://mail.chatgpt.org.uk").strip(),
+        "gptmail_api_key": str(c.get("gptmail_api_key") or "").strip(),
+        "gptmail_domain": str(c.get("gptmail_domain") or "").strip(),
+        "duckmail_api_url": str(c.get("duckmail_api_url") or "https://www.duckmail.sbs").strip(),
+        "duckmail_provider_url": str(c.get("duckmail_provider_url") or "https://api.duckmail.sbs").strip(),
+        "duckmail_bearer": str(c.get("duckmail_bearer") or "").strip(),
+        "duckmail_domain": str(c.get("duckmail_domain") or "").strip(),
+        "duckmail_api_key": str(c.get("duckmail_api_key") or "").strip(),
+        "maliapi_base_url": str(c.get("maliapi_base_url") or "https://maliapi.215.im/v1").strip(),
+        "maliapi_api_key": str(c.get("maliapi_api_key") or c.get("yyds_api_key") or "").strip(),
+        "maliapi_domain": str(c.get("maliapi_domain") or "").strip(),
+        "luckmail_base_url": str(c.get("luckmail_base_url") or "https://mails.luckyous.com/").strip(),
+        "luckmail_api_key": str(c.get("luckmail_api_key") or "").strip(),
+        "luckmail_project_code": str(c.get("luckmail_project_code") or "grok").strip(),
+        "luckmail_domain": str(c.get("luckmail_domain") or "").strip(),
+        "skymail_api_base": str(c.get("skymail_api_base") or "https://api.skymail.ink").strip(),
+        "skymail_token": str(c.get("skymail_token") or "").strip(),
+        "skymail_domain": str(c.get("skymail_domain") or "").strip(),
+        "cloudmail_api_base": str(c.get("cloudmail_api_base") or "").strip(),
+        "cloudmail_admin_email": str(c.get("cloudmail_admin_email") or "").strip(),
+        "cloudmail_admin_password": str(c.get("cloudmail_admin_password") or "").strip(),
+        "cloudmail_domain": str(c.get("cloudmail_domain") or "").strip(),
+        "freemail_api_url": str(c.get("freemail_api_url") or "").strip(),
+        "freemail_admin_token": str(c.get("freemail_admin_token") or "").strip(),
+        "freemail_domain": str(c.get("freemail_domain") or "").strip(),
+        "opentrashmail_api_url": str(c.get("opentrashmail_api_url") or "").strip(),
+        "opentrashmail_domain": str(c.get("opentrashmail_domain") or "").strip(),
+        "opentrashmail_password": str(c.get("opentrashmail_password") or "").strip(),
+        "laoudo_auth": str(c.get("laoudo_auth") or "").strip(),
+        "laoudo_email": str(c.get("laoudo_email") or "").strip(),
+        "laoudo_account_id": str(c.get("laoudo_account_id") or "").strip(),
         "hint": hint,
     }
 
@@ -661,51 +719,92 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
 def apply_email_config_from_ui(data: dict) -> dict:
     """Merge panel email form into config.json and return public view."""
     cfg = load_config()
-    provider = str(data.get("provider") or "custom").strip().lower()
+    provider = str(data.get("provider") or "cfworker").strip().lower()
     if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
-        raise ValueError(
-            "内置公共临时邮已移除（滥用后拒收 xAI 验证码）。请使用「自定义」自建临时邮 API。"
-        )
-    if provider not in ("custom", "cloudflare"):
-        raise ValueError("当前仅支持自定义临时邮 API（provider=custom）")
+        raise ValueError("内置公共 Tempmailer 已移除，请选择其它邮箱源")
+    if provider == "custom":
+        provider = "cfworker"
+    if provider == "yyds":
+        provider = "maliapi"
+
+    valid = {
+        "cfworker", "cloudflare", "moemail", "tempmail_lol", "duckmail", "gptmail",
+        "maliapi", "luckmail", "skymail", "cloudmail", "freemail", "opentrashmail", "laoudo",
+    }
+    if provider not in valid:
+        raise ValueError(f"不支持的邮箱源: {provider}")
 
     cfg["email_failover"] = bool(data.get("email_failover", True))
+    cfg["email_provider"] = provider
+    cfg["email_providers"] = [provider]
 
-    # custom -> cloudflare backend channel
-    api_base = str(data.get("custom_api_base") or "").strip().rstrip("/")
-    if not api_base:
-        raise ValueError("必须填写自建临时邮 API 根地址")
-    cfg["email_provider"] = "cloudflare"
-    cfg["cloudflare_api_base"] = api_base
-    cfg["cloudflare_api_key"] = str(data.get("custom_api_key") or "").strip()
-    mode = str(data.get("custom_auth_mode") or "x-admin-auth").strip().lower()
+    def g(key, default=""):
+        return str(data.get(key, cfg.get(key, default)) or default).strip()
+
+    # always store fields (so switching providers keeps values)
+    cfg["cfworker_api_url"] = g("cfworker_api_url") or g("custom_api_base")
+    cfg["cfworker_admin_token"] = g("cfworker_admin_token") or g("custom_api_key")
+    cfg["cfworker_domain"] = g("cfworker_domain") or g("custom_domain")
+    cfg["cfworker_custom_auth"] = g("cfworker_custom_auth")
+    cfg["cfworker_subdomain"] = g("cfworker_subdomain")
+
+    # cloudflare_temp_email legacy keys
+    cfg["cloudflare_api_base"] = g("custom_api_base") or g("cfworker_api_url")
+    cfg["cloudflare_api_key"] = g("custom_api_key") or g("cfworker_admin_token")
+    mode = g("custom_auth_mode", "x-admin-auth").lower() or "x-admin-auth"
     if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
         mode = "x-admin-auth"
-    # register: x-api-key / x-admin-auth / query-key / none; anything else + key => Authorization Bearer
-    if mode == "bearer":
-        cfg["cloudflare_auth_mode"] = "auth"
-    else:
-        cfg["cloudflare_auth_mode"] = mode
-    domain = str(data.get("custom_domain") or "").strip()
-    cfg["defaultDomains"] = domain
-    cfg["cloudflare_path_accounts"] = str(
-        data.get("custom_path_accounts") or "/admin/new_address"
-    ).strip() or "/admin/new_address"
-    cfg["cloudflare_path_messages"] = str(
-        data.get("custom_path_messages") or "/api/mails"
-    ).strip() or "/api/mails"
-    cfg["cloudflare_path_token"] = str(
-        data.get("custom_path_token") or "/api/token"
-    ).strip() or "/api/token"
-    # 清理旧 Tempmailer 配置残留
+    cfg["cloudflare_auth_mode"] = "auth" if mode == "bearer" else mode
+    cfg["defaultDomains"] = g("custom_domain") or g("cfworker_domain")
+    cfg["cloudflare_path_accounts"] = g("custom_path_accounts", "/admin/new_address") or "/admin/new_address"
+    cfg["cloudflare_path_messages"] = g("custom_path_messages", "/api/mails") or "/api/mails"
+    cfg["cloudflare_path_token"] = g("custom_path_token", "/api/token") or "/api/token"
+
+    for key in (
+        "moemail_api_url", "moemail_api_key",
+        "gptmail_base_url", "gptmail_api_key", "gptmail_domain",
+        "duckmail_api_url", "duckmail_provider_url", "duckmail_bearer", "duckmail_domain", "duckmail_api_key",
+        "maliapi_base_url", "maliapi_api_key", "maliapi_domain",
+        "luckmail_base_url", "luckmail_api_key", "luckmail_project_code", "luckmail_domain",
+        "skymail_api_base", "skymail_token", "skymail_domain",
+        "cloudmail_api_base", "cloudmail_admin_email", "cloudmail_admin_password", "cloudmail_domain",
+        "freemail_api_url", "freemail_admin_token", "freemail_domain",
+        "opentrashmail_api_url", "opentrashmail_domain", "opentrashmail_password",
+        "laoudo_auth", "laoudo_email", "laoudo_account_id",
+    ):
+        if key in data or key in cfg:
+            cfg[key] = g(key, cfg.get(key, ""))
+
+    # sync yyds keys for legacy
+    if cfg.get("maliapi_api_key") and not cfg.get("yyds_api_key"):
+        cfg["yyds_api_key"] = cfg["maliapi_api_key"]
+
+    # required fields soft-check for selected provider
+    need = {
+        "cfworker": ["cfworker_api_url"],
+        "cloudflare": ["cloudflare_api_base"],
+        "luckmail": ["luckmail_api_key"],
+        "skymail": ["skymail_token"],
+        "cloudmail": ["cloudmail_api_base"],
+        "freemail": ["freemail_api_url"],
+        "opentrashmail": ["opentrashmail_api_url"],
+        "laoudo": ["laoudo_email"],
+        "maliapi": ["maliapi_api_key"],
+    }
+    for field in need.get(provider, []):
+        if not str(cfg.get(field) or "").strip():
+            # allow cloudflare/cfworker alias
+            if provider == "cfworker" and cfg.get("cloudflare_api_base"):
+                continue
+            if provider == "cloudflare" and cfg.get("cfworker_api_url"):
+                continue
+            raise ValueError(f"邮箱源 {provider} 需要配置: {field}")
+
     cfg.pop("tempmailer_api_base", None)
     cfg.pop("tempmailer_domain", None)
     cfg.pop("tempmailer_domains", None)
-    cfg["email_providers"] = ["cloudflare"]
-
     save_config(cfg)
     return email_config_public(cfg)
-
 
 
 def resolve_proxy_url() -> str:
@@ -982,7 +1081,7 @@ def _run_one_round(round_no: int, total: int) -> bool:
     global PROXY_URL
     PROXY_URL = cfg_run["proxy"]
     os.environ["GROK_PROXY"] = PROXY_URL
-    cfg_run.setdefault("email_provider", "cloudflare")
+    cfg_run.setdefault("email_provider", "cfworker")
     engine = str(cfg_run.get("browser_engine") or "chromium").strip().lower()
     if engine in ("camoufox", "firefox", "headless", "cfox"):
         engine = "camoufox"
@@ -1034,15 +1133,44 @@ def _run_one_round(round_no: int, total: int) -> bool:
         f"round_timeout={round_timeout}s"
     )
 
-    # 注册前强制检查邮箱：公共 Tempmailer 已移除
+    # 注册前检查邮箱源是否可用（公共 Tempmailer 已移除）
     try:
         mail_cfg = load_config()
-        mail_base = str(mail_cfg.get("cloudflare_api_base") or "").strip()
-        mail_prov = str(mail_cfg.get("email_provider") or "").strip().lower()
-        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten") or not mail_base:
-            log_line("[!] 未配置自建临时邮 API：内置公共临时邮已因滥用拒收 xAI 验证码")
-            log_line("[!] 请到面板「邮箱服务」填写自定义 API（兼容 cloudflare_temp_email）后重试")
+        mail_prov = str(mail_cfg.get("email_provider") or "cfworker").strip().lower()
+        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten"):
+            log_line("[!] 内置公共临时邮已移除，请在面板下拉选择其它邮箱源")
             return False
+        # no-key providers
+        free_ok = mail_prov in ("tempmail_lol", "moemail", "gptmail", "duckmail")
+        has_cf = bool(str(mail_cfg.get("cfworker_api_url") or mail_cfg.get("cloudflare_api_base") or "").strip())
+        has_luck = bool(str(mail_cfg.get("luckmail_api_key") or "").strip())
+        has_mali = bool(str(mail_cfg.get("maliapi_api_key") or mail_cfg.get("yyds_api_key") or "").strip())
+        has_sky = bool(str(mail_cfg.get("skymail_token") or "").strip())
+        has_cloud = bool(str(mail_cfg.get("cloudmail_api_base") or "").strip())
+        has_free = bool(str(mail_cfg.get("freemail_api_url") or "").strip())
+        has_otm = bool(str(mail_cfg.get("opentrashmail_api_url") or "").strip())
+        has_lao = bool(str(mail_cfg.get("laoudo_email") or "").strip())
+        ok = free_ok
+        if mail_prov in ("cfworker", "cloudflare", "custom"):
+            ok = has_cf
+        elif mail_prov == "luckmail":
+            ok = has_luck
+        elif mail_prov in ("maliapi", "yyds"):
+            ok = has_mali
+        elif mail_prov == "skymail":
+            ok = has_sky
+        elif mail_prov == "cloudmail":
+            ok = has_cloud
+        elif mail_prov == "freemail":
+            ok = has_free
+        elif mail_prov == "opentrashmail":
+            ok = has_otm
+        elif mail_prov == "laoudo":
+            ok = has_lao
+        if not ok:
+            log_line(f"[!] 邮箱源 {mail_prov} 尚未配置完整，请到面板「邮箱服务」填写后保存")
+            return False
+        log_line(f"[*] 邮箱源: {mail_prov}")
     except Exception as e:
         log_line(f"[!] 检查邮箱配置失败: {e}")
         return False
@@ -1496,49 +1624,66 @@ INDEX_HTML = r"""
   <div class="card">
     <h2>邮箱服务</h2>
     <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid #5b3b14;background:rgba(180,100,20,.12);border-radius:10px;color:#f0c674">
-      <b>内置公共临时邮已移除。</b>因滥用，Tempmailer 等已暂时拒收 xAI 验证码邮件（提示类似 “emails from xAI are temporarily not accepted”）。
-      请使用自建域名临时邮 API（兼容 <b>cloudflare_temp_email</b>）。
+      公共 Tempmailer 已移除（滥用后拒收 xAI 验证码）。请用下拉框选择邮箱源；自建/CF Worker 通常更稳，公共源可能仍被拒。
     </div>
     <div class="row">
       <label>邮箱源
-        <select id="email_provider" onchange="onEmailProviderChange()">
-          <option value="custom">自定义 / 自建临时邮 API</option>
-        </select>
+        <select id="email_provider" onchange="onEmailProviderChange()"></select>
       </label>
       <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
         <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
       </label>
       <button class="btn primary" onclick="saveEmailConfig()">保存邮箱设置</button>
     </div>
-    <div id="email_custom_box" style="display:block;margin-top:10px">
-      <div class="muted" style="font-size:12px;margin-bottom:8px;line-height:1.5">
-        对接自建临时邮箱：程序调用「创建地址」拿到邮箱+token，再轮询「收信」提取 xAI 验证码。<br/>
-        常见管理员创建路径：<code>/admin/new_address</code>，鉴权头：<code>x-admin-auth</code>。
+
+    <div id="box_cfworker" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="cfworker_api_url" placeholder="https://apimail.example.com"/>
+        </label>
+        <label>Admin Token
+          <input type="password" id="cfworker_admin_token" placeholder="管理员密钥"/>
+        </label>
       </div>
+      <div class="row" style="margin-top:8px">
+        <label>域名
+          <input type="text" id="cfworker_domain" placeholder="mail.example.com"/>
+        </label>
+        <label>站点密码
+          <input type="password" id="cfworker_custom_auth" placeholder="可选"/>
+        </label>
+        <label>子域名
+          <input type="text" id="cfworker_subdomain" placeholder="可选"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_cloudflare" class="mail-box" style="display:none;margin-top:10px">
+      <div class="muted" style="font-size:12px;margin-bottom:8px">兼容 cloudflare_temp_email：创建地址 + 收信。</div>
       <div class="row">
         <label style="flex:2">API 根地址
           <input type="text" id="custom_api_base" placeholder="https://mail.example.com"/>
         </label>
-        <label>API Key / 管理密码
-          <input type="password" id="custom_api_key" placeholder="可选，视你的服务而定"/>
+        <label>API Key
+          <input type="password" id="custom_api_key" placeholder="x-admin-auth"/>
         </label>
       </div>
       <div class="row" style="margin-top:8px">
         <label>鉴权方式
           <select id="custom_auth_mode">
-            <option value="x-admin-auth">x-admin-auth（推荐，cf-temp-email 管理）</option>
-            <option value="bearer">Authorization Bearer</option>
+            <option value="x-admin-auth">x-admin-auth</option>
+            <option value="bearer">Bearer</option>
             <option value="x-api-key">X-API-Key</option>
-            <option value="query-key">URL ?key=</option>
-            <option value="none">无鉴权</option>
+            <option value="query-key">?key=</option>
+            <option value="none">无</option>
           </select>
         </label>
-        <label>邮箱域名（可空则服务端默认）
+        <label>域名
           <input type="text" id="custom_domain" placeholder="mail.example.com"/>
         </label>
       </div>
       <div class="row" style="margin-top:8px">
-        <label>创建地址路径
+        <label>创建路径
           <input type="text" id="custom_path_accounts" placeholder="/admin/new_address"/>
         </label>
         <label>收信路径
@@ -1549,6 +1694,166 @@ INDEX_HTML = r"""
         </label>
       </div>
     </div>
+
+    <div id="box_moemail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="moemail_api_url" placeholder="https://sall.cc"/>
+        </label>
+        <label>API Key
+          <input type="password" id="moemail_api_key" placeholder="可选"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_tempmail_lol" class="mail-box" style="display:none;margin-top:10px">
+      <div class="muted" style="font-size:12px">TempMail.lol：无需 Key，自动生成邮箱后轮询收信（可能被 xAI 拒绝）。</div>
+    </div>
+
+    <div id="box_duckmail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label>Web URL
+          <input type="text" id="duckmail_api_url" placeholder="https://www.duckmail.sbs"/>
+        </label>
+        <label>Provider URL
+          <input type="text" id="duckmail_provider_url" placeholder="https://api.duckmail.sbs"/>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>Bearer
+          <input type="password" id="duckmail_bearer" placeholder="可选"/>
+        </label>
+        <label>API Key
+          <input type="password" id="duckmail_api_key" placeholder="可选"/>
+        </label>
+        <label>域名
+          <input type="text" id="duckmail_domain" placeholder="可选"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_gptmail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="gptmail_base_url" placeholder="https://mail.chatgpt.org.uk"/>
+        </label>
+        <label>API Key
+          <input type="password" id="gptmail_api_key" placeholder="可选"/>
+        </label>
+        <label>域名
+          <input type="text" id="gptmail_domain" placeholder="可选，填了则本地拼地址"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_maliapi" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="maliapi_base_url" placeholder="https://maliapi.215.im/v1"/>
+        </label>
+        <label>API Key
+          <input type="password" id="maliapi_api_key"/>
+        </label>
+        <label>域名
+          <input type="text" id="maliapi_domain" placeholder="可选"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_luckmail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">平台地址
+          <input type="text" id="luckmail_base_url" placeholder="https://mails.luckyous.com"/>
+        </label>
+        <label>API Key
+          <input type="password" id="luckmail_api_key"/>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>项目代码
+          <input type="text" id="luckmail_project_code" placeholder="grok"/>
+        </label>
+        <label>域名
+          <input type="text" id="luckmail_domain" placeholder="可选"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_skymail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API Base
+          <input type="text" id="skymail_api_base" placeholder="https://api.skymail.ink"/>
+        </label>
+        <label>Token
+          <input type="password" id="skymail_token"/>
+        </label>
+        <label>域名
+          <input type="text" id="skymail_domain"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_cloudmail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API Base
+          <input type="text" id="cloudmail_api_base"/>
+        </label>
+        <label>管理员邮箱
+          <input type="text" id="cloudmail_admin_email"/>
+        </label>
+        <label>管理员密码
+          <input type="password" id="cloudmail_admin_password"/>
+        </label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>域名
+          <input type="text" id="cloudmail_domain"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_freemail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="freemail_api_url"/>
+        </label>
+        <label>Admin Token
+          <input type="password" id="freemail_admin_token"/>
+        </label>
+        <label>域名
+          <input type="text" id="freemail_domain"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_opentrashmail" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label style="flex:2">API URL
+          <input type="text" id="opentrashmail_api_url"/>
+        </label>
+        <label>域名
+          <input type="text" id="opentrashmail_domain"/>
+        </label>
+        <label>密码
+          <input type="password" id="opentrashmail_password"/>
+        </label>
+      </div>
+    </div>
+
+    <div id="box_laoudo" class="mail-box" style="display:none;margin-top:10px">
+      <div class="row">
+        <label>Auth
+          <input type="password" id="laoudo_auth"/>
+        </label>
+        <label>邮箱
+          <input type="text" id="laoudo_email"/>
+        </label>
+        <label>Account ID
+          <input type="text" id="laoudo_account_id"/>
+        </label>
+      </div>
+    </div>
+
     <div class="muted" style="margin-top:10px;font-size:12px;display:none" id="email_hint"></div>
   </div>
 
@@ -1605,29 +1910,146 @@ async function api(url, opt){
   return j;
 }
 function onEmailProviderChange(){
-  const custom=document.getElementById('email_custom_box');
-  if(custom) custom.style.display='block';
-  const sel=document.getElementById('email_provider');
-  if(sel) sel.value='custom';
+  const p=document.getElementById('email_provider').value||'cfworker';
+  document.querySelectorAll('.mail-box').forEach(el=>{ el.style.display='none'; });
+  const box=document.getElementById('box_'+p);
+  if(box) box.style.display='block';
+  // cloudflare alias box
+  if(p==='cloudflare'){
+    const b=document.getElementById('box_cloudflare');
+    if(b) b.style.display='block';
+  }
+  if(p==='cfworker'){
+    const b=document.getElementById('box_cfworker');
+    if(b) b.style.display='block';
+  }
 }
+function _val(id){const el=document.getElementById(id); return el?el.value:'';}
+function _set(id,v){const el=document.getElementById(id); if(el) el.value=v||'';}
+function _check(id,v){const el=document.getElementById(id); if(el) el.checked=!!v;}
 async function loadEmailConfig(){
   try{
     const j=await api('/api/config/email');
     const e=j.email||{};
-    document.getElementById('email_provider').value='custom';
-    document.getElementById('email_failover').checked=!!e.email_failover;
-    document.getElementById('custom_api_base').value=e.custom_api_base||'';
-    document.getElementById('custom_api_key').value=e.custom_api_key||'';
-    document.getElementById('custom_auth_mode').value=e.custom_auth_mode||'x-admin-auth';
-    document.getElementById('custom_domain').value=e.custom_domain||'';
-    document.getElementById('custom_path_accounts').value=e.custom_path_accounts||'/admin/new_address';
-    document.getElementById('custom_path_messages').value=e.custom_path_messages||'/api/mails';
-    document.getElementById('custom_path_token').value=e.custom_path_token||'/api/token';
+    const sel=document.getElementById('email_provider');
+    sel.innerHTML='';
+    (e.choices||[]).forEach(c=>{
+      const o=document.createElement('option');
+      o.value=c.id; o.textContent=c.label;
+      sel.appendChild(o);
+    });
+    let prov=e.provider||'cfworker';
+    if(![...sel.options].some(o=>o.value===prov)) prov='cfworker';
+    sel.value=prov;
+    _check('email_failover', e.email_failover);
+    _set('cfworker_api_url', e.cfworker_api_url);
+    _set('cfworker_admin_token', e.cfworker_admin_token);
+    _set('cfworker_domain', e.cfworker_domain);
+    _set('cfworker_custom_auth', e.cfworker_custom_auth);
+    _set('cfworker_subdomain', e.cfworker_subdomain);
+    _set('custom_api_base', e.custom_api_base);
+    _set('custom_api_key', e.custom_api_key);
+    _set('custom_auth_mode', e.custom_auth_mode||'x-admin-auth');
+    _set('custom_domain', e.custom_domain);
+    _set('custom_path_accounts', e.custom_path_accounts||'/admin/new_address');
+    _set('custom_path_messages', e.custom_path_messages||'/api/mails');
+    _set('custom_path_token', e.custom_path_token||'/api/token');
+    _set('moemail_api_url', e.moemail_api_url||'https://sall.cc');
+    _set('moemail_api_key', e.moemail_api_key);
+    _set('gptmail_base_url', e.gptmail_base_url||'https://mail.chatgpt.org.uk');
+    _set('gptmail_api_key', e.gptmail_api_key);
+    _set('gptmail_domain', e.gptmail_domain);
+    _set('duckmail_api_url', e.duckmail_api_url||'https://www.duckmail.sbs');
+    _set('duckmail_provider_url', e.duckmail_provider_url||'https://api.duckmail.sbs');
+    _set('duckmail_bearer', e.duckmail_bearer);
+    _set('duckmail_api_key', e.duckmail_api_key);
+    _set('duckmail_domain', e.duckmail_domain);
+    _set('maliapi_base_url', e.maliapi_base_url||'https://maliapi.215.im/v1');
+    _set('maliapi_api_key', e.maliapi_api_key);
+    _set('maliapi_domain', e.maliapi_domain);
+    _set('luckmail_base_url', e.luckmail_base_url||'https://mails.luckyous.com');
+    _set('luckmail_api_key', e.luckmail_api_key);
+    _set('luckmail_project_code', e.luckmail_project_code||'grok');
+    _set('luckmail_domain', e.luckmail_domain);
+    _set('skymail_api_base', e.skymail_api_base||'https://api.skymail.ink');
+    _set('skymail_token', e.skymail_token);
+    _set('skymail_domain', e.skymail_domain);
+    _set('cloudmail_api_base', e.cloudmail_api_base);
+    _set('cloudmail_admin_email', e.cloudmail_admin_email);
+    _set('cloudmail_admin_password', e.cloudmail_admin_password);
+    _set('cloudmail_domain', e.cloudmail_domain);
+    _set('freemail_api_url', e.freemail_api_url);
+    _set('freemail_admin_token', e.freemail_admin_token);
+    _set('freemail_domain', e.freemail_domain);
+    _set('opentrashmail_api_url', e.opentrashmail_api_url);
+    _set('opentrashmail_domain', e.opentrashmail_domain);
+    _set('opentrashmail_password', e.opentrashmail_password);
+    _set('laoudo_auth', e.laoudo_auth);
+    _set('laoudo_email', e.laoudo_email);
+    _set('laoudo_account_id', e.laoudo_account_id);
     setEmailHint(e.hint||'');
     onEmailProviderChange();
   }catch(err){
     setEmailHint('加载邮箱配置失败: '+err.message);
   }
+}
+async function saveEmailConfig(){
+  const body={
+    provider: document.getElementById('email_provider').value,
+    email_failover: document.getElementById('email_failover').checked,
+    cfworker_api_url: _val('cfworker_api_url'),
+    cfworker_admin_token: _val('cfworker_admin_token'),
+    cfworker_domain: _val('cfworker_domain'),
+    cfworker_custom_auth: _val('cfworker_custom_auth'),
+    cfworker_subdomain: _val('cfworker_subdomain'),
+    custom_api_base: _val('custom_api_base'),
+    custom_api_key: _val('custom_api_key'),
+    custom_auth_mode: _val('custom_auth_mode')||'x-admin-auth',
+    custom_domain: _val('custom_domain'),
+    custom_path_accounts: _val('custom_path_accounts'),
+    custom_path_messages: _val('custom_path_messages'),
+    custom_path_token: _val('custom_path_token'),
+    moemail_api_url: _val('moemail_api_url'),
+    moemail_api_key: _val('moemail_api_key'),
+    gptmail_base_url: _val('gptmail_base_url'),
+    gptmail_api_key: _val('gptmail_api_key'),
+    gptmail_domain: _val('gptmail_domain'),
+    duckmail_api_url: _val('duckmail_api_url'),
+    duckmail_provider_url: _val('duckmail_provider_url'),
+    duckmail_bearer: _val('duckmail_bearer'),
+    duckmail_api_key: _val('duckmail_api_key'),
+    duckmail_domain: _val('duckmail_domain'),
+    maliapi_base_url: _val('maliapi_base_url'),
+    maliapi_api_key: _val('maliapi_api_key'),
+    maliapi_domain: _val('maliapi_domain'),
+    luckmail_base_url: _val('luckmail_base_url'),
+    luckmail_api_key: _val('luckmail_api_key'),
+    luckmail_project_code: _val('luckmail_project_code'),
+    luckmail_domain: _val('luckmail_domain'),
+    skymail_api_base: _val('skymail_api_base'),
+    skymail_token: _val('skymail_token'),
+    skymail_domain: _val('skymail_domain'),
+    cloudmail_api_base: _val('cloudmail_api_base'),
+    cloudmail_admin_email: _val('cloudmail_admin_email'),
+    cloudmail_admin_password: _val('cloudmail_admin_password'),
+    cloudmail_domain: _val('cloudmail_domain'),
+    freemail_api_url: _val('freemail_api_url'),
+    freemail_admin_token: _val('freemail_admin_token'),
+    freemail_domain: _val('freemail_domain'),
+    opentrashmail_api_url: _val('opentrashmail_api_url'),
+    opentrashmail_domain: _val('opentrashmail_domain'),
+    opentrashmail_password: _val('opentrashmail_password'),
+    laoudo_auth: _val('laoudo_auth'),
+    laoudo_email: _val('laoudo_email'),
+    laoudo_account_id: _val('laoudo_account_id'),
+  };
+  try{
+    const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    toast(j.message||'邮箱设置已保存');
+    if(j.email){
+      setEmailHint('已保存 · 当前: '+(j.email.provider||''));
+    }
+  }catch(e){toast('保存失败: '+e.message)}
 }
 function setEmailHint(text){
   const el=document.getElementById('email_hint');

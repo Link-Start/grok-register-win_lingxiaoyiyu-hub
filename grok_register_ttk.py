@@ -47,6 +47,11 @@ _LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 try:
+    import mail_providers as mail_providers  # type: ignore
+except Exception:
+    mail_providers = None  # type: ignore
+
+try:
     from mailbox_core import (  # type: ignore
         GROK_CODE_PATTERN,
         extract_code as mailbox_extract_code,
@@ -119,11 +124,53 @@ DEFAULT_CONFIG = {
     "cloudflare_path_token": "/api/token",
     "cloudflare_path_messages": "/api/mails",
     # 默认使用自建临时邮（cloudflare_temp_email 兼容）。内置 Tempmailer 已移除。
-    "email_provider": "cloudflare",
+    "email_provider": "cfworker",
     # 邮箱故障自动切换：按 email_providers 顺序轮换（只使用已配置可用的源）
     # 注意：公共 Tempmailer / inboxkitten 已因滥用被拒收 xAI 邮件，不再内置
     "email_failover": True,
-    "email_providers": ["cloudflare", "duckmail", "yyds"],
+    "email_providers": [
+        "cfworker","cloudflare","moemail","tempmail_lol","duckmail","gptmail",
+        "maliapi","luckmail","skymail","cloudmail","freemail","opentrashmail","laoudo","yyds",
+    ],
+    "moemail_api_url": "https://sall.cc",
+    "moemail_api_key": "",
+    "gptmail_base_url": "https://mail.chatgpt.org.uk",
+    "gptmail_api_key": "",
+    "gptmail_domain": "",
+    "duckmail_api_url": "https://www.duckmail.sbs",
+    "duckmail_provider_url": "https://api.duckmail.sbs",
+    "duckmail_bearer": "",
+    "duckmail_domain": "",
+    "maliapi_base_url": "https://maliapi.215.im/v1",
+    "maliapi_api_key": "",
+    "maliapi_domain": "",
+    "luckmail_base_url": "https://mails.luckyous.com/",
+    "luckmail_api_key": "",
+    "luckmail_project_code": "grok",
+    "luckmail_email_type": "",
+    "luckmail_domain": "",
+    "skymail_api_base": "https://api.skymail.ink",
+    "skymail_token": "",
+    "skymail_domain": "",
+    "cloudmail_api_base": "",
+    "cloudmail_admin_email": "",
+    "cloudmail_admin_password": "",
+    "cloudmail_domain": "",
+    "freemail_api_url": "",
+    "freemail_admin_token": "",
+    "freemail_domain": "",
+    "opentrashmail_api_url": "",
+    "opentrashmail_domain": "",
+    "opentrashmail_password": "",
+    "cfworker_api_url": "",
+    "cfworker_admin_token": "",
+    "cfworker_domain": "",
+    "cfworker_custom_auth": "",
+    "cfworker_subdomain": "",
+    "laoudo_auth": "",
+    "laoudo_email": "",
+    "laoudo_account_id": "",
+
     "proxy": "http://127.0.0.1:7890",
     # 代理失败时是否回退直连（本地版默认关闭，避免直连拿不到 grok SSO）
     "allow_proxy_fallback": False,
@@ -1376,28 +1423,29 @@ def pick_domain(api_key=None):
 # 请使用自建临时邮 API（面板「自定义」/ cloudflare_temp_email 兼容接口）。
 
 def get_email_provider():
-    p = str(config.get("email_provider") or "cloudflare").strip().lower()
-    # 已废弃的公共源：强制引导到自建/cloudflare 通道
-    if p in ("tempmailer", "inboxkitten", "inbox_kitten"):
-        return "cloudflare"
-    return p or "cloudflare"
+    if mail_providers is not None:
+        return mail_providers.normalize_provider(config.get("email_provider") or "cfworker")
+    p = str(config.get("email_provider") or "cfworker").strip().lower()
+    if p in ("tempmailer", "inboxkitten", "inbox_kitten", "custom"):
+        return "cfworker"
+    return p or "cfworker"
 
 
 def email_provider_ready(provider: str) -> bool:
     """判断邮箱源是否已配置到可尝试状态。"""
-    p = (provider or "").strip().lower()
-    # 公共临时邮已移除（滥用后拒收 xAI 验证码）
+    if mail_providers is not None:
+        return mail_providers.provider_ready(config, provider)
+    p = str(provider or "").strip().lower()
     if p in ("tempmailer", "inboxkitten", "inbox_kitten"):
         return False
-    if p == "duckmail":
-        return bool(str(config.get("duckmail_api_key") or "").strip())
-    if p == "yyds":
-        return bool(
-            str(config.get("yyds_api_key") or "").strip()
-            or str(config.get("yyds_jwt") or "").strip()
-        )
-    if p == "cloudflare":
-        return bool(str(config.get("cloudflare_api_base") or "").strip())
+    if p in ("tempmail_lol", "moemail", "gptmail", "duckmail"):
+        return True
+    if p in ("cfworker", "cloudflare", "custom"):
+        return bool(str(config.get("cfworker_api_url") or config.get("cloudflare_api_base") or "").strip())
+    if p == "luckmail":
+        return bool(str(config.get("luckmail_api_key") or "").strip())
+    if p in ("maliapi", "yyds"):
+        return bool(str(config.get("maliapi_api_key") or config.get("yyds_api_key") or config.get("yyds_jwt") or "").strip())
     return False
 
 
@@ -1411,7 +1459,7 @@ def get_email_provider_chain():
     else:
         chain = []
     # 过滤已废弃的 inboxkitten
-    chain = [p for p in chain if p not in ("inboxkitten", "inbox_kitten")]
+    chain = [p for p in chain if p not in ("inboxkitten", "inbox_kitten", "tempmailer")]
     primary = get_email_provider()
     if primary and primary not in chain:
         chain.insert(0, primary)
@@ -1479,26 +1527,47 @@ def is_mail_related_error(exc) -> bool:
     return any(k.lower() in msg for k in keys)
 
 
-def _get_email_and_token_once(provider, api_key=None):
+def _get_email_and_token_once(provider, api_key=None, log_callback=None):
     provider = (provider or "").strip().lower()
+    if mail_providers is not None:
+        provider = mail_providers.normalize_provider(provider)
     if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
         raise Exception(
             "内置公共临时邮已移除：因滥用，Tempmailer 等已拒收 xAI 验证码邮件。"
-            "请在面板「邮箱服务」配置自建临时邮 API（自定义 / cloudflare_temp_email 兼容）。"
+            "请在面板下拉选择其它邮箱源（CF Worker / MoeMail / LuckMail / DuckMail 等）。"
         )
-    if provider == "yyds":
+    if mail_providers is not None and mail_providers.import_ok():
+        try:
+            return mail_providers.get_email_and_token(
+                config,
+                provider,
+                proxy=get_configured_proxy(),
+                log_callback=log_callback,
+            )
+        except Exception as exc:
+            if provider not in ("cloudflare", "cfworker", "custom", "duckmail", "yyds", "maliapi"):
+                raise
+            if log_callback:
+                log_callback(f"[!] 适配器申请邮箱失败，尝试旧通道: {exc}")
+    if provider in ("yyds", "maliapi"):
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
-    if provider == "cloudflare":
-        api_base = get_cloudflare_api_base()
+    if provider in ("cloudflare", "cfworker", "custom"):
+        api_base = get_cloudflare_api_base() or str(config.get("cfworker_api_url") or "").strip()
         if not api_base:
-            raise Exception("Cloudflare API Base 未配置")
+            raise Exception("自建邮箱 API 未配置（cfworker_api_url / cloudflare_api_base）")
+        if not str(config.get("cloudflare_api_base") or "").strip():
+            config["cloudflare_api_base"] = api_base
+        if not get_cloudflare_api_key():
+            config["cloudflare_api_key"] = str(
+                config.get("cfworker_admin_token") or config.get("cloudflare_api_key") or ""
+            ).strip()
         try:
             return cloudflare_create_temp_address(api_base)
         except Exception as primary_exc:
             key = api_key or get_cloudflare_api_key()
             domains = cloudflare_get_domains(api_base, api_key=key)
             if not domains:
-                raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
+                raise Exception(f"Cloudflare/自建 创建邮箱失败: {primary_exc}")
             verified = [d for d in domains if d.get("isVerified")]
             target = verified[0] if verified else domains[0]
             domain = target.get("domain")
@@ -1507,17 +1576,14 @@ def _get_email_and_token_once(provider, api_key=None):
             username = generate_username(10)
             address = f"{username}@{domain}"
             password = secrets.token_urlsafe(12)
-            cloudflare_create_account(
-                api_base, address, password, api_key=key, expires_in=0
-            )
+            cloudflare_create_account(api_base, address, password, api_key=key, expires_in=0)
             token = cloudflare_get_token(api_base, address, password, api_key=key)
             if not token:
                 raise Exception("获取 Cloudflare 邮箱 token 失败")
             return address, token
-    # duckmail default
     key = api_key or get_duckmail_api_key()
     if not key:
-        raise Exception("DuckMail API Key 未配置")
+        raise Exception(f"邮箱源 {provider} 未配置或不可用")
     domain = pick_domain(api_key=key)
     username = generate_username(10)
     address = f"{username}@{domain}"
@@ -1527,6 +1593,7 @@ def _get_email_and_token_once(provider, api_key=None):
     if not token:
         raise Exception("获取 DuckMail token 失败")
     return address, token
+
 
 
 def get_email_and_token(api_key=None, log_callback=None):
@@ -1544,7 +1611,7 @@ def get_email_and_token(api_key=None, log_callback=None):
         provider = chain[(_email_provider_index + i) % len(chain)]
         config["email_provider"] = provider
         try:
-            email, token = _get_email_and_token_once(provider, api_key=api_key)
+            email, token = _get_email_and_token_once(provider, api_key=api_key, log_callback=log_callback)
             if log_callback:
                 log_callback(f"[*] 邮箱源 {provider} 创建成功: {email}")
             # 记住当前成功源
@@ -1579,10 +1646,26 @@ def get_oai_code(
     - otp_sent_at: 发码时间戳，跳过更早的邮件
     """
     provider = get_email_provider()
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
-        raise Exception(
-            "内置公共临时邮已移除，无法拉取验证码。请配置自建临时邮 API（自定义）。"
-        )
+    # any-auto-register BaseMailbox.wait_for_code for dropdown providers
+    if mail_providers is not None and mail_providers.import_ok() and provider not in ("yyds",):
+        try:
+            return mail_providers.wait_for_code(
+                email,
+                dev_token,
+                timeout=int(timeout or 180),
+                cancel_callback=cancel_callback,
+                before_ids=before_ids,
+                otp_sent_at=otp_sent_at,
+                log_callback=log_callback,
+                config=config,
+                provider=provider,
+                proxy=get_configured_proxy(),
+            )
+        except Exception as exc:
+            if provider not in ("cloudflare", "cfworker", "custom", "duckmail"):
+                raise
+            if log_callback:
+                log_callback(f"[!] 适配器收码失败，尝试旧通道: {exc}")
     if provider == "yyds":
         return yyds_get_oai_code(
             dev_token,
@@ -1701,6 +1784,8 @@ def extract_verification_code(text, subject=""):
 
 def snapshot_inbox_ids(dev_token, email=None, log_callback=None):
     """发码前快照当前邮件 id（对齐 any-auto-register before_ids）。"""
+    if mail_providers is not None and mail_providers.import_ok():
+        return mail_providers.snapshot_ids(log_callback=log_callback)
     provider = get_email_provider()
     ids = set()
     try:
