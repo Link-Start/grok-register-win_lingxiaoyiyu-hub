@@ -1995,7 +1995,7 @@ async function loadEmailConfig(){
 }
 async function saveEmailConfig(){
   const body={
-    provider: document.getElementById('email_provider').value,
+    provider: (document.getElementById('email_provider').value||'cfworker'),
     email_failover: document.getElementById('email_failover').checked,
     cfworker_api_url: _val('cfworker_api_url'),
     cfworker_admin_token: _val('cfworker_admin_token'),
@@ -2057,26 +2057,6 @@ function setEmailHint(text){
   const t=String(text||'').trim();
   el.textContent=t;
   el.style.display=t ? '' : 'none';
-}
-async function saveEmailConfig(){
-  const body={
-    provider: 'custom',
-    email_failover: document.getElementById('email_failover').checked,
-    custom_api_base: document.getElementById('custom_api_base').value.trim(),
-    custom_api_key: document.getElementById('custom_api_key').value,
-    custom_auth_mode: document.getElementById('custom_auth_mode').value,
-    custom_domain: document.getElementById('custom_domain').value.trim(),
-    custom_path_accounts: document.getElementById('custom_path_accounts').value.trim(),
-    custom_path_messages: document.getElementById('custom_path_messages').value.trim(),
-    custom_path_token: document.getElementById('custom_path_token').value.trim(),
-  };
-  try{
-    const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    toast(j.message||'邮箱设置已保存');
-    if(j.email){
-      setEmailHint('已保存 · 当前: '+(j.email.provider||'')+(j.email.custom_api_base?(' · '+j.email.custom_api_base):''));
-    }
-  }catch(e){toast('保存失败: '+e.message)}
 }
 function toggleSelectAllFiles(on){
   const boxes=document.querySelectorAll('.chk-file');
