@@ -437,11 +437,123 @@ def list_cpa_files() -> List[Path]:
     return sorted(CPA_DIR.glob("xai-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def active_identity_sets() -> Tuple[Set[str], Set[str]]:
+    """Emails + SSO fingerprints currently visible on the panel."""
+    emails: Set[str] = set()
+    fps: Set[str] = set()
+    for acc in unique_accounts():
+        email = str(acc.get("email") or "").strip().lower()
+        if email and email not in ("unknown",):
+            emails.add(email)
+        sso = normalize_sso(acc.get("sso") or "")
+        if sso:
+            fps.add(sso_fingerprint(sso))
+    return emails, fps
+
+
+def cpa_matches_active(obj: dict, emails: Set[str], fps: Set[str]) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    sso = normalize_sso(obj.get("sso") or "")
+    if sso and sso_fingerprint(sso) in fps:
+        return True
+    email = str(obj.get("email") or "").strip().lower()
+    if email and email in emails:
+        return True
+    return False
+
+
+def list_active_cpa_files() -> List[Path]:
+    """CPA files that belong to current panel accounts only."""
+    emails, fps = active_identity_sets()
+    if not emails and not fps:
+        return []
+    out: List[Path] = []
+    for p in list_cpa_files():
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if cpa_matches_active(obj, emails, fps):
+            out.append(p)
+    return out
+
+
+def prune_orphan_cpa() -> int:
+    """Delete CPA JSON not matching any current panel account."""
+    emails, fps = active_identity_sets()
+    removed = 0
+    removed_fps: Set[str] = set()
+    for p in list(list_cpa_files()):
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            try:
+                p.unlink()
+                removed += 1
+            except Exception:
+                pass
+            continue
+        keep = bool(emails or fps) and cpa_matches_active(obj, emails, fps)
+        if keep:
+            continue
+        try:
+            sso = normalize_sso((obj or {}).get("sso") or "")
+            if sso:
+                removed_fps.add(sso_fingerprint(sso))
+            p.unlink()
+            removed += 1
+        except Exception:
+            pass
+    if removed_fps or removed:
+        # drop index entries for removed fingerprints; rebuild lightly
+        try:
+            items: Dict[str, dict] = {}
+            if CPA_INDEX_PATH.exists():
+                data = json.loads(CPA_INDEX_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("items"), dict):
+                    items = {
+                        k: v
+                        for k, v in data["items"].items()
+                        if k not in removed_fps
+                    }
+            # also drop index rows whose file is gone
+            alive_files = {p.name for p in list_cpa_files()}
+            items = {
+                k: v
+                for k, v in items.items()
+                if not isinstance(v, dict)
+                or not v.get("file")
+                or v.get("file") in alive_files
+            }
+            CPA_INDEX_PATH.write_text(
+                json.dumps(
+                    {
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        "items": items,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        with _cpa_lock:
+            if removed_fps:
+                _cpa_done.difference_update(removed_fps)
+            # recount done roughly by remaining files
+            _cpa_state["ok"] = len(list_cpa_files())
+    return removed
+
+
 def cpa_stats() -> dict:
     with _cpa_lock:
         st = dict(_cpa_state)
         done_n = len(_cpa_done)
-    files = list_cpa_files()
+    # UI / download count = current panel batch only
+    files = list_active_cpa_files()
     st["files"] = len(files)
     st["done"] = done_n
     st["dir"] = str(CPA_DIR)
@@ -2622,11 +2734,12 @@ def download_accounts_json():
 
 @app.get("/download/cpa.zip")
 def download_cpa_zip():
-    """主接口 2：已自动 OAuth 转换的真 CPA JSON（auth_kind=oauth）。"""
+    """主接口 2：当前面板账号对应的 CPA JSON（auth_kind=oauth）。"""
     need = require_login()
     if need:
         return need
-    files = list_cpa_files()
+    # 只打包面板当前账号对应的 CPA，删掉的不会再进包
+    files = list_active_cpa_files()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         readme = (
@@ -2634,9 +2747,9 @@ def download_cpa_zip():
             "====================================\n\n"
             "1) 每个 xai-*.json 是 OAuth 凭证（access_token + refresh_token）。\n"
             "2) auth_kind=oauth，可直接放进 CLIProxyAPI auth-dir。\n"
-            "3) 由注册成功后的 web SSO 自动换票生成。\n"
-            "4) all.json 为全部账号数组；failed.jsonl 为转换失败记录（若有）。\n"
-            "5) 若 zip 为空：先注册，或点「补转未转换 CPA」。\n"
+            "3) 仅包含当前面板账号列表中的号（删除后不会再进此包）。\n"
+            "4) all.json 为全部账号数组。\n"
+            "5) 若 zip 为空：先注册/上传，或点「补转未转换 CPA」。\n"
         )
         zf.writestr("README.txt", readme)
         all_entries = []
@@ -2653,15 +2766,11 @@ def download_cpa_zip():
             "all.json",
             json.dumps(all_entries, ensure_ascii=False, indent=2) + "\n",
         )
-        if CPA_FAILED_PATH.exists():
-            try:
-                zf.write(CPA_FAILED_PATH, arcname="failed.jsonl")
-            except Exception:
-                pass
         if not files:
             zf.writestr(
                 "EMPTY.txt",
-                "暂无已转换的 CPA 文件。注册成功后会自动转换，或点击面板「补转未转换 CPA」。\n",
+                "暂无当前面板账号的 CPA 文件。注册/上传成功后会自动转换，"
+                "或点击面板「补转未转换 CPA」。\n",
             )
     buf.seek(0)
     fname = f"cpa_oauth_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
@@ -2671,10 +2780,10 @@ def download_cpa_zip():
 
 
 def _load_cpa_entries_for_sub2() -> Tuple[List[dict], List[str]]:
-    """Read existing CPA JSON files for Sub2 export. No re-OAuth."""
+    """Read CPA JSON for current panel accounts only. No re-OAuth."""
     entries: List[dict] = []
     name_hints: List[str] = []
-    for p in list_cpa_files():
+    for p in list_active_cpa_files():
         try:
             obj = json.loads(p.read_text(encoding="utf-8"))
             if not isinstance(obj, dict):
@@ -2810,9 +2919,9 @@ def download_sub2_zip():
             "   管理后台 → 账号 → 导入数据 → 上传 all.json\n"
             "2) grok-*.json：每个账号一份完整 sub2api-data（也可单独导入）。\n"
             "3) type=sub2api-data / version=1 / platform=grok / type=oauth\n"
-            "4) 由已转换的 CPA OAuth 凭证现场映射，不重新注册/换票。\n"
+            "4) 仅映射当前面板账号对应的 CPA，删除后不会再进此包。\n"
             "5) proxies 为空；导入后请在 Sub2API 里绑定分组/代理。\n"
-            "6) 若 zip 为空：先注册，或点面板「补转未转换 CPA」。\n"
+            "6) 若 zip 为空：先注册/上传并等待 CPA 转换完成。\n"
         )
         zf.writestr("README.txt", readme)
 
@@ -2838,8 +2947,7 @@ def download_sub2_zip():
         if not accounts:
             zf.writestr(
                 "EMPTY.txt",
-                "暂无已转换账号。注册成功后会自动转 CPA，再点「下载 Sub2」；"
-                "或先点面板「补转未转换 CPA」。\n",
+                "暂无当前面板账号的 CPA。注册/上传成功并转换后，再点「下载 Sub2」。\n",
             )
 
     buf.seek(0)
@@ -2928,7 +3036,7 @@ def api_nodes_select():
 
 @app.post("/api/accounts/delete")
 def api_accounts_delete():
-    """Delete selected accounts_*.txt files (after user downloaded them)."""
+    """Delete selected accounts_*.txt and prune matching CPA JSON."""
     need = require_login()
     if need:
         return need
@@ -2955,6 +3063,13 @@ def api_accounts_delete():
         except Exception as e:
             errors.append(f"{name}: {e}")
 
+    pruned = 0
+    if deleted:
+        # 同步清掉已不在面板里的 CPA，保证下载数量 = 面板当前数量
+        pruned = prune_orphan_cpa()
+        if pruned:
+            log_line(f"[*] 已清理无主账号的 CPA 文件: {pruned} 个")
+
     if not deleted and errors:
         return jsonify({"ok": False, "error": "; ".join(errors)}), 400
     return jsonify(
@@ -2963,7 +3078,9 @@ def api_accounts_delete():
             "deleted": deleted,
             "missing": missing,
             "errors": errors,
-            "message": f"已删除 {len(deleted)} 个文件"
+            "cpa_pruned": pruned,
+            "message": f"已删除 {len(deleted)} 个账号文件"
+            + (f"，清理 CPA {pruned}" if pruned else "")
             + (f"，跳过 {len(missing)}" if missing else ""),
         }
     )
