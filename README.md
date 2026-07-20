@@ -6,7 +6,7 @@
 
 ### Windows 下双击即用的 Grok（xAI）账号自动注册面板
 
-[![Version](https://img.shields.io/badge/version-v1.2.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
+[![Version](https://img.shields.io/badge/version-v1.3.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=for-the-badge)](#环境要求)
 [![Python](https://img.shields.io/badge/python-3.10+-yellow?style=for-the-badge)](https://www.python.org/downloads/)
@@ -65,12 +65,13 @@
 - **🤖 注册引擎**：Chromium 有头 / Camoufox 无头反检测，面板下拉切换
 - **📧 邮箱**：面板下拉多邮箱源（CF Worker / MoeMail / TempMail.lol / DuckMail / GPTMail / LuckMail / MaliAPI 等）；公共 Tempmailer 已移除
 - **🔄 SSO → CPA**：注册成功后自动把 web SSO 换成 CLIProxyAPI 可用的 OAuth JSON
+- **⬆ 上传 SSO 续期**：面板上传 SSO txt / CPA `all.json`（含 `sso` 字段），整批换票生成新 CPA；旧数据归档到 `data/archive/`
 - **🔞 NSFW 自动开启**：注册成功后自动设置 ToS、生日、NSFW 偏好
 - **📦 产物下载**（同一批账号，三种格式，不重复注册/换票）：
   - SSO TXT：`email----password----sso`
   - CPA ZIP：`xai-*.json`（`auth_kind=oauth`，CLIProxyAPI）
   - Sub2 ZIP：`sub2api-data` 官方导入包（单账号 `grok-*.json` + 合集 `all.json`，可一键导入）
-- **🗂️ 账号管理**：面板内勾选删除，避免重复下载
+- **🗂️ 账号管理**：面板内勾选删除；上传/注册切换工作区，避免混批
 
 ---
 
@@ -95,7 +96,8 @@
    - 失败日志见 `data\logs\start.log`
 4. **浏览器自动打开** http://127.0.0.1:8787（免密直进）
 5. **配置邮箱**：在「邮箱服务」下拉选择邮箱源并填写对应配置，保存
-6. **开始注册**：点 **开始注册**
+6. **开始注册**：点 **开始注册**  
+   或 **上传 SSO**：在「上传 SSO → CPA / Sub2」选择 txt / `all.json`，点 **上传并转换**（会整批替换当前工作区）
 7. **下载产物**：完成后下载 SSO / CPA / Sub2，不需要的账号可勾选删除
    - Sub2：点「下载 Sub2」→ 解压后用 `all.json`（或单个 `grok-*.json`）在 Sub2API「导入数据」上传
 
@@ -203,9 +205,10 @@ grok-register-win/
 │   └── patch_playwright.py   # Playwright 驱动崩溃自动修补
 ├── data/
 │   ├── logs/                 # 运行日志
-│   └── cpa/                  # 已转换 CPA JSON
+│   ├── cpa/                  # 当前工作区 CPA JSON
+│   └── archive/              # 上传/切换模式时归档的旧批次
 ├── docs/                     # 截图与文档
-└── accounts_*.txt            # 注册产出
+└── accounts_*.txt            # 注册 / 上传产出
 ```
 
 ---
@@ -252,9 +255,19 @@ grok-register-win/
 <summary><b>🔏 验证码收不到 / xAI 拒信</b></summary>
 <br>
 
-- 公共临时邮可能直接拒收 xAI 邮件
+- 公共临时邮可能直接拒收 xAI 邮件（含 TempMail.lol）
 - 换 **CF Worker 自建域名** 或其它可用源后重试
 - 节点优先日本
+</details>
+
+<details>
+<summary><b>⬆ 上传 SSO / all.json 续期</b></summary>
+<br>
+
+- 面板「上传 SSO → CPA / Sub2」选择 txt 或 CPA 的 `all.json`
+- 每次上传会**清空并替换**当前工作区（旧数据在 `data/archive/`）
+- 等 CPA 队列转完后，用顶部下载 CPA / Sub2
+- 若大量失败：SSO 可能已过期，或上游 403 对话权限被拒
 </details>
 
 <details>
@@ -272,6 +285,16 @@ grok-register-win/
 
 <details>
 <summary><b>查看完整更新日志</b></summary>
+
+### v1.3.0（2026-07-20）
+- **上传 SSO 整批续期**：面板新增「上传 SSO → CPA / Sub2」
+  - 支持 `email----password----sso` / `email----sso` / 纯 SSO 的 txt
+  - 支持 CPA 导出的 `all.json` / 单账号 JSON（读取其中的 `sso` 字段）
+  - 每次上传**整批替换**当前工作区：旧账号与 CPA 先归档到 `data/archive/`
+  - 转换完成后继续用顶部 **下载 SSO / CPA / Sub2** 按钮
+- **工作区隔离**：上传模式与注册模式切换时归档清空，避免混批
+- 从上传模式点「开始注册」会归档上传批次后再注册
+- API：`POST /api/sso/upload-convert`（multipart `file`）
 
 ### v1.2.0（2026-07-18）
 - **多邮箱源下拉（重大更新）**：接入 any-auto-register 邮箱/接码体系

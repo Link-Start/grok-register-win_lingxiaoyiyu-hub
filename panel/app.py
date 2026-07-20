@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -76,11 +77,26 @@ CPA_DIR = Path(os.environ.get("CPA_DIR", str(BASE_DIR / "data" / "cpa"))).resolv
 CPA_DIR.mkdir(parents=True, exist_ok=True)
 CPA_INDEX_PATH = CPA_DIR / "index.json"
 CPA_FAILED_PATH = CPA_DIR / "failed.jsonl"
+ARCHIVE_DIR = Path(
+    os.environ.get("ARCHIVE_DIR", str(BASE_DIR / "data" / "archive"))
+).resolve()
+ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 SSO2CPA_PATH = Path(
     os.environ.get("SSO2CPA_PATH", str(BASE_DIR / "lib"))
 ).resolve()
 AUTO_CPA = os.environ.get("AUTO_CPA", "1").strip() not in ("0", "false", "False", "no")
 CPA_DELAY = float(os.environ.get("CPA_DELAY", "1.0"))
+# workspace mode: register (本机注册) | upload (上传 SSO 整批替换)
+_workspace_mode = "register"
+_workspace_batch = 0
+_workspace_meta: Dict = {
+    "mode": "register",
+    "batch": 0,
+    "source": "",
+    "total": 0,
+    "queued": 0,
+    "updated_at": "",
+}
 # Hard wall-clock per register round (one account). Stuck process is killed, next round starts.
 DEFAULT_ROUND_TIMEOUT_SEC = 300
 # Optional: talk to local Clash Meta external-controller for node list.
@@ -102,6 +118,7 @@ try:
         cpa_to_sub2_account,
         convert_one,
         normalize_sso,
+        parse_uploaded_records,
         safe_filename as cpa_safe_filename,
         sso_fingerprint,
     )
@@ -112,6 +129,7 @@ except Exception as _e:  # pragma: no cover
     convert_one = None  # type: ignore
     build_sub2_payload = None  # type: ignore
     cpa_to_sub2_account = None  # type: ignore
+    parse_uploaded_records = None  # type: ignore
     normalize_sso = lambda t: (t or "").strip()  # type: ignore
     cpa_safe_filename = lambda s: re.sub(r"[^\w.@+-]+", "_", s or "unknown")[:100]  # type: ignore
     sso_fingerprint = lambda s: hashlib.sha256((s or "").encode()).hexdigest()  # type: ignore
@@ -590,6 +608,179 @@ def start_cpa_worker() -> None:
     load_cpa_index()
     th = threading.Thread(target=_cpa_worker_loop, name="cpa-worker", daemon=True)
     th.start()
+
+
+def _drain_cpa_queue() -> int:
+    """Drop pending convert jobs without processing them."""
+    n = 0
+    while True:
+        try:
+            item = _cpa_q.get_nowait()
+        except queue.Empty:
+            break
+        if item is None:
+            break
+        n += 1
+        try:
+            _cpa_q.task_done()
+        except Exception:
+            pass
+    with _cpa_lock:
+        _cpa_inflight.clear()
+        _cpa_state["pending"] = 0
+        _cpa_state["running"] = False
+    return n
+
+
+def _archive_current_workspace(reason: str = "replace") -> Optional[Path]:
+    """Move current accounts_*.txt + data/cpa into data/archive/<ts>/."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = ARCHIVE_DIR / f"{ts}_{reason}"
+    moved_any = False
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        acc_dir = dest / "accounts"
+        cpa_dir = dest / "cpa"
+        acc_dir.mkdir(exist_ok=True)
+        cpa_dir.mkdir(exist_ok=True)
+        for p in list_account_files():
+            try:
+                shutil.move(str(p), str(acc_dir / p.name))
+                moved_any = True
+            except Exception as e:
+                log_line(f"[WORKSPACE] archive account fail {p.name}: {e}")
+        if CPA_DIR.exists():
+            for p in CPA_DIR.iterdir():
+                if not p.is_file():
+                    continue
+                try:
+                    shutil.move(str(p), str(cpa_dir / p.name))
+                    moved_any = True
+                except Exception as e:
+                    log_line(f"[WORKSPACE] archive cpa fail {p.name}: {e}")
+        if moved_any:
+            log_line(f"[WORKSPACE] 已归档旧数据 → {dest}")
+            return dest
+        # empty archive folder: remove
+        try:
+            shutil.rmtree(dest, ignore_errors=True)
+        except Exception:
+            pass
+    except Exception as e:
+        log_line(f"[WORKSPACE] archive error: {e}")
+    return None
+
+
+def reset_workspace_for_upload(source_name: str, total: int) -> dict:
+    """Whole-batch replace: archive old data, clear CPA state, enter upload mode."""
+    global _workspace_mode, _workspace_batch, _workspace_meta
+    drained = _drain_cpa_queue()
+    archived = _archive_current_workspace("upload")
+    with _cpa_lock:
+        _cpa_done.clear()
+        _cpa_inflight.clear()
+        _cpa_state["pending"] = 0
+        _cpa_state["ok"] = 0
+        _cpa_state["fail"] = 0
+        _cpa_state["last_error"] = ""
+        _cpa_state["last_ok_email"] = ""
+        _cpa_state["running"] = False
+    # ensure empty cpa dir
+    CPA_DIR.mkdir(parents=True, exist_ok=True)
+    for leftover in list(CPA_DIR.glob("*")):
+        if leftover.is_file():
+            try:
+                leftover.unlink()
+            except Exception:
+                pass
+    _workspace_mode = "upload"
+    _workspace_batch += 1
+    _workspace_meta = {
+        "mode": "upload",
+        "batch": _workspace_batch,
+        "source": source_name or "upload.txt",
+        "total": int(total or 0),
+        "queued": 0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "archived": str(archived) if archived else "",
+        "drained": drained,
+    }
+    return dict(_workspace_meta)
+
+
+def set_workspace_register_mode(reason: str = "register") -> None:
+    """Switch UI mode marker back to register (does not delete upload batch)."""
+    global _workspace_mode, _workspace_meta
+    _workspace_mode = "register"
+    _workspace_meta = {
+        "mode": "register",
+        "batch": _workspace_batch,
+        "source": reason,
+        "total": 0,
+        "queued": 0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def workspace_stats() -> dict:
+    meta = dict(_workspace_meta)
+    meta["mode"] = _workspace_mode
+    meta["account_count"] = len(unique_accounts())
+    meta["cpa_files"] = len(list_cpa_files())
+    return meta
+
+
+def write_upload_accounts_file(records: List[dict], source_name: str = "") -> Path:
+    """Write current batch as single accounts_upload_*.txt (email----password----sso)."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = BASE_DIR / f"accounts_upload_{ts}.txt"
+    lines = []
+    for rec in records:
+        email = str(rec.get("email") or "").strip() or "unknown"
+        password = str(rec.get("password") or "").strip()
+        sso = normalize_sso(rec.get("sso") or "")
+        if not sso:
+            continue
+        lines.append(f"{email}----{password}----{sso}")
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return path
+
+
+def parse_upload_file_bytes(raw: bytes, filename: str = "") -> List[dict]:
+    """Parse uploaded SSO txt/json into {email,password,sso} records."""
+    if parse_uploaded_records is None:
+        raise RuntimeError(f"sso2cpa core unavailable: {_CPA_CORE_ERR}")
+    base = parse_uploaded_records(raw, filename=filename or "")
+    # recover password when line is email----password----sso
+    text = raw.decode("utf-8", "replace")
+    pass_map: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "----" in line:
+            parts = line.split("----")
+            if len(parts) >= 3:
+                email = parts[0].strip()
+                password = parts[1].strip()
+                sso = normalize_sso(parts[-1])
+                if sso:
+                    pass_map[sso] = password
+                    if email:
+                        pass_map[f"e:{email.lower()}"] = password
+    out = []
+    for rec in base:
+        sso = normalize_sso(rec.get("sso") or "")
+        if not sso:
+            continue
+        email = str(rec.get("email") or "").strip()
+        password = (
+            str(rec.get("password") or "").strip()
+            or pass_map.get(sso, "")
+            or pass_map.get(f"e:{email.lower()}", "")
+        )
+        out.append({"email": email, "password": password, "sso": sso})
+    return out
 
 
 def to_grok2api_pool(accounts: List[dict]) -> dict:
@@ -1622,6 +1813,24 @@ INDEX_HTML = r"""
   </div>
 
   <div class="card">
+    <h2>上传 SSO → CPA / Sub2</h2>
+    <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:10px">
+      上传 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO 的 txt（或 json）。
+      <strong>每次上传会整批替换</strong>当前工作区：旧账号与 CPA 会先归档到 <code>data/archive/</code>，再只保留本批。
+      转换完成后继续用顶部 <strong>下载 SSO / CPA / Sub2</strong> 按钮。
+    </div>
+    <div class="row">
+      <label style="flex:2">SSO 文件
+        <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
+      </label>
+      <button class="btn primary" id="btn_upload_convert" onclick="uploadSsoConvert()">⬆ 上传并转换</button>
+    </div>
+    <div class="muted" style="margin-top:10px;font-size:12px" id="upload_hint">
+      当前模式：注册 · 未上传批次
+    </div>
+  </div>
+
+  <div class="card">
     <h2>邮箱服务</h2>
     <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid #5b3b14;background:rgba(180,100,20,.12);border-radius:10px;color:#f0c674">
       公共 Tempmailer 已移除（滥用后拒收 xAI 验证码）。请用下拉框选择邮箱源；自建/CF Worker 通常更稳，公共源可能仍被拒。
@@ -2122,12 +2331,42 @@ async function backfillCpa(){
     poll();
   }catch(e){toast('补转失败: '+e.message)}
 }
+async function uploadSsoConvert(){
+  const input=document.getElementById('sso_upload_file');
+  if(!input || !input.files || !input.files.length){
+    toast('请先选择 SSO txt/json 文件');
+    return;
+  }
+  if(!confirm('上传后会整批替换当前工作区（旧账号与 CPA 会归档）。确定继续？')){
+    return;
+  }
+  const fd=new FormData();
+  fd.append('file', input.files[0]);
+  const btn=document.getElementById('btn_upload_convert');
+  if(btn) btn.disabled=true;
+  try{
+    const r=await fetch('/api/sso/upload-convert',{method:'POST',body:fd,credentials:'same-origin'});
+    const j=await r.json();
+    if(!r.ok || j.ok===false){
+      throw new Error(j.error||('HTTP '+r.status));
+    }
+    toast(j.message||('已入队 '+j.queued+' 个'));
+    if(input) input.value='';
+    poll();
+    setTimeout(()=>location.reload(), 800);
+  }catch(e){
+    toast('上传转换失败: '+e.message);
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
 let lastLogLen=0;
 async function poll(){
   try{
     const j=await api('/api/job/status');
     const st=j.job||{};
     const cpa=j.cpa||{};
+    const ws=j.workspace||{};
     document.getElementById('st_status').textContent=st.status||'idle';
     document.getElementById('st_dot').className='dot'+(st.running?' run':'');
     document.getElementById('st_sf').textContent=`${st.success||0} / ${st.fail||0}`;
@@ -2139,12 +2378,24 @@ async function poll(){
       document.getElementById('st_cpa_q').textContent=
         `${cpa.pending||0}待 / ${cpa.ok||0}成 / ${cpa.fail||0}败`;
     }
+    if(document.getElementById('st_accounts')){
+      document.getElementById('st_accounts').textContent=String(ws.account_count!=null?ws.account_count:(j.accounts||0));
+    }
     if(document.getElementById('cpa_hint')){
       const core = cpa.core_ok ? 'core就绪' : ('core失败: '+(cpa.core_error||''));
       const last = cpa.last_ok_email ? (' · 最近OK: '+cpa.last_ok_email) : '';
       const err = cpa.last_error ? (' · 最近错: '+cpa.last_error) : '';
       document.getElementById('cpa_hint').textContent =
         `代理走本机 Clash · 自动CPA: ${cpa.enabled?'开':'关'} · ${core} · 文件 ${cpa.files||0}${last}${err}`;
+    }
+    if(document.getElementById('upload_hint')){
+      const mode = ws.mode==='upload' ? '上传' : '注册';
+      const src = ws.source ? (' · 来源 '+ws.source) : '';
+      const tot = ws.total!=null ? (' · 本批 '+ws.total) : '';
+      const q = ws.queued!=null ? (' · 已入队 '+ws.queued) : '';
+      const okf = ' · CPA文件 '+(cpa.files||0);
+      document.getElementById('upload_hint').textContent =
+        '当前模式：'+mode+src+tot+q+okf+' · 下载按钮只反映当前工作区';
     }
     const box=document.getElementById('logbox');
     const logs=j.logs||[];
@@ -2746,7 +2997,16 @@ def api_job_status():
         return need
     with _job_lock:
         job = dict(_job)
-    return jsonify({"ok": True, "job": job, "logs": list(_logs), "cpa": cpa_stats()})
+    return jsonify(
+        {
+            "ok": True,
+            "job": job,
+            "logs": list(_logs),
+            "cpa": cpa_stats(),
+            "workspace": workspace_stats(),
+            "accounts": len(unique_accounts()),
+        }
+    )
 
 
 @app.get("/api/cpa/status")
@@ -2754,7 +3014,7 @@ def api_cpa_status():
     need = require_login()
     if need:
         return need
-    return jsonify({"ok": True, "cpa": cpa_stats()})
+    return jsonify({"ok": True, "cpa": cpa_stats(), "workspace": workspace_stats()})
 
 
 @app.post("/api/cpa/backfill")
@@ -2773,6 +3033,71 @@ def api_cpa_backfill():
     n = enqueue_missing_accounts(limit=limit)
     log_line(f"[CPA] 手动补转入队: {n}")
     return jsonify({"ok": True, "queued": n, "message": f"已入队 {n} 个待转换 SSO"})
+
+
+@app.post("/api/sso/upload-convert")
+def api_sso_upload_convert():
+    """Upload SSO txt/json → whole-batch replace workspace → queue CPA convert.
+
+    Download buttons keep using current workspace only.
+    """
+    need = require_login()
+    if need:
+        return need
+    if not _CPA_CORE_OK or convert_one is None or parse_uploaded_records is None:
+        return jsonify({"ok": False, "error": f"core unavailable: {_CPA_CORE_ERR}"}), 500
+    if bool(_job.get("running")):
+        return jsonify({"ok": False, "error": "注册任务进行中，请先停止再上传"}), 400
+
+    f = request.files.get("file") or request.files.get("sso")
+    if f is None:
+        return jsonify({"ok": False, "error": "请上传 file 字段（txt/json）"}), 400
+    filename = (f.filename or "upload.txt").strip()
+    raw = f.read()
+    if not raw:
+        return jsonify({"ok": False, "error": "文件为空"}), 400
+    if len(raw) > 30 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "文件过大（>30MB）"}), 400
+
+    try:
+        records = parse_upload_file_bytes(raw, filename=filename)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"解析失败: {e}"}), 400
+    if not records:
+        return jsonify({"ok": False, "error": "未解析到有效 SSO"}), 400
+
+    meta = reset_workspace_for_upload(source_name=filename, total=len(records))
+    out_path = write_upload_accounts_file(records, source_name=filename)
+
+    queued = 0
+    for rec in records:
+        ok, _ = enqueue_cpa_convert(
+            email=rec.get("email") or "",
+            sso=rec.get("sso") or "",
+            password=rec.get("password") or "",
+            source=out_path.name,
+            force=True,
+        )
+        if ok:
+            queued += 1
+
+    _workspace_meta["queued"] = queued
+    _workspace_meta["accounts_file"] = out_path.name
+    log_line(
+        f"[UPLOAD] {filename} → {len(records)} SSO，入队 {queued}，"
+        f"工作区文件 {out_path.name}（旧数据已归档）"
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"已替换工作区：解析 {len(records)}，入队 {queued}。请等 CPA 队列转完后下载。",
+            "parsed": len(records),
+            "queued": queued,
+            "accounts_file": out_path.name,
+            "workspace": workspace_stats(),
+            "archived": meta.get("archived") or "",
+        }
+    )
 
 
 def _normalize_browser_engine(value: str) -> str:
@@ -2831,10 +3156,28 @@ def api_job_start():
         cfg = load_config()
         cfg["browser_engine"] = eng
         save_config(cfg)
+    # 从上传模式切到注册：整批归档清空，避免和注册号混在一起
+    if _workspace_mode == "upload":
+        _drain_cpa_queue()
+        arch = _archive_current_workspace("register-start")
+        with _cpa_lock:
+            _cpa_done.clear()
+            _cpa_inflight.clear()
+            _cpa_state["pending"] = 0
+            _cpa_state["ok"] = 0
+            _cpa_state["fail"] = 0
+            _cpa_state["last_error"] = ""
+            _cpa_state["last_ok_email"] = ""
+        set_workspace_register_mode("register-start")
+        log_line(
+            f"[WORKSPACE] 开始注册 → 已归档上传批次"
+            + (f" ({arch})" if arch else "")
+            + "，工作区清空后重新注册"
+        )
     ok, msg = start_job(count)
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
-    return jsonify({"ok": True, "message": msg})
+    return jsonify({"ok": True, "message": msg, "workspace": workspace_stats()})
 
 
 @app.post("/api/job/stop")
