@@ -397,9 +397,9 @@
             <option value="camoufox">Camoufox 无头（反检测）</option>
           </select>
         </label>
-        <button class="btn go" onclick="toast('开始注册')">▶ Execute</button>
-        <button class="btn stop" onclick="toast('已停止')">■ Halt</button>
-        <button class="btn ghost" onclick="toast('补转 CPA 队列')">⟳ Backfill CPA</button>
+        <button class="btn go" onclick="toast('开始注册')">▶ 开始注册</button>
+        <button class="btn stop" onclick="toast('已停止')">■ 停止</button>
+        <button class="btn ghost" onclick="toast('补转 CPA 队列')">⟳ 补转 CPA</button>
       </div>
       <div class="hint">代理走本机 Clash · 注册成功后自动转 CPA · 节点优先 <code>日本</code> 成功率更高</div>
     </div>
@@ -419,7 +419,7 @@
           <span class="lab"><b>SSO 文件</b> · INPUT FILE</span>
           <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
         </label>
-        <button class="btn" onclick="toast('上传并转换')">⬆ Upload &amp; Convert</button>
+        <button class="btn" onclick="toast('上传并转换')">⬆ 上传并转换</button>
       </div>
       <div class="hint" style="border-color:var(--steel)">当前模式：注册 · 未上传批次</div>
     </div>
@@ -455,7 +455,7 @@
         <label class="chk-row">
           <input type="checkbox" id="email_failover" checked/> 失败时自动换源
         </label>
-        <button class="btn go" onclick="toast('邮箱设置已保存')">💾 Save Config</button>
+        <button class="btn go" onclick="toast('邮箱设置已保存')">💾 保存邮箱设置</button>
       </div>
 
       <div id="box_cfworker" class="mailbox show">
