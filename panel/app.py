@@ -937,28 +937,24 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         provider = "maliapi"
 
     choices = [
-        {"id": "cfworker", "label": "CF Worker / 自建域名"},
-        {"id": "cloudflare", "label": "自定义 cloudflare_temp_email"},
-        {"id": "moemail", "label": "MoeMail (sall.cc)"},
-        {"id": "tempmail_lol", "label": "TempMail.lol（自动生成）"},
-        {"id": "duckmail", "label": "DuckMail"},
-        {"id": "gptmail", "label": "GPTMail"},
-        {"id": "maliapi", "label": "YYDS / MaliAPI"},
-        {"id": "luckmail", "label": "LuckMail（接码/买邮）"},
-        {"id": "skymail", "label": "SkyMail"},
-        {"id": "cloudmail", "label": "CloudMail"},
-        {"id": "freemail", "label": "Freemail 自建"},
-        {"id": "opentrashmail", "label": "OpenTrashMail"},
-        {"id": "laoudo", "label": "Laoudo 固定邮箱"},
+        {"id": "cfworker", "label": "CF Worker", "group": "自建"},
+        {"id": "cloudflare", "label": "Cloudflare Temp Email", "group": "自建"},
+        {"id": "moemail", "label": "MoeMail", "group": "自建"},
+        {"id": "freemail", "label": "Freemail", "group": "自建"},
+        {"id": "opentrashmail", "label": "OpenTrashMail", "group": "自建"},
+        {"id": "tempmail_lol", "label": "TempMail.lol", "group": "公共"},
+        {"id": "duckmail", "label": "DuckMail", "group": "公共"},
+        {"id": "gptmail", "label": "GPTMail", "group": "公共"},
+        {"id": "maliapi", "label": "MaliAPI", "group": "付费"},
+        {"id": "luckmail", "label": "LuckMail", "group": "付费"},
+        {"id": "skymail", "label": "SkyMail", "group": "付费"},
+        {"id": "cloudmail", "label": "CloudMail", "group": "付费"},
+        {"id": "laoudo", "label": "Laoudo", "group": "付费"},
     ]
     valid = {x["id"] for x in choices}
     if provider not in valid:
         provider = "cfworker"
 
-    hint = (
-        "公共 Tempmailer 已移除（滥用后拒收 xAI 验证码）。"
-        "请从下拉框选择邮箱源；自建/CF Worker 通常更稳，公共源可能仍被 xAI 拒绝。"
-    )
     return {
         "provider": provider,
         "choices": choices,
@@ -1015,7 +1011,6 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         "laoudo_auth": str(c.get("laoudo_auth") or "").strip(),
         "laoudo_email": str(c.get("laoudo_email") or "").strip(),
         "laoudo_account_id": str(c.get("laoudo_account_id") or "").strip(),
-        "hint": hint,
     }
 
 
@@ -1914,22 +1909,13 @@ INDEX_HTML = r"""
       <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
       <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">补转未转换 CPA</button>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">
-      代理走本机 Clash（config.json 的 proxy，常见 7897）。节点在 Clash 里选。注册成功后自动转 CPA。
-      Camoufox 首次使用会自动下载浏览器二进制。
-    </div>
-    <div class="muted" style="margin-top:8px;font-size:12px;line-height:1.55">
-      提示：绝大多数注册失败来自网络环境，而非脚本本身。实测机场节点里<strong style="color:var(--ok);font-weight:600">日本</strong>更稳；
-      新加坡 / 美国 / 德国成功率偏低。失败时请先在 Clash 换日本节点再试。
-    </div>
+    <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">代理走本机 Clash · 注册成功后自动转 CPA</div>
   </div>
 
   <div class="card">
     <h2>上传 SSO → CPA / Sub2</h2>
     <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:10px">
-      上传 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO 的 txt（或 json）。
-      <strong>每次上传会整批替换</strong>当前工作区：旧账号与 CPA 会先归档到 <code>data/archive/</code>，再只保留本批。
-      转换完成后继续用顶部 <strong>下载 SSO / CPA / Sub2</strong> 按钮。
+      支持 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO。上传会整批替换当前工作区（旧数据归档到 <code>data/archive/</code>）。
     </div>
     <div class="row">
       <label style="flex:2">SSO 文件
@@ -1944,9 +1930,6 @@ INDEX_HTML = r"""
 
   <div class="card">
     <h2>邮箱服务</h2>
-    <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid #5b3b14;background:rgba(180,100,20,.12);border-radius:10px;color:#f0c674">
-      公共 Tempmailer 已移除（滥用后拒收 xAI 验证码）。请用下拉框选择邮箱源；自建/CF Worker 通常更稳，公共源可能仍被拒。
-    </div>
     <div class="row">
       <label>邮箱源
         <select id="email_provider" onchange="onEmailProviderChange()"></select>
@@ -1980,7 +1963,6 @@ INDEX_HTML = r"""
     </div>
 
     <div id="box_cloudflare" class="mail-box" style="display:none;margin-top:10px">
-      <div class="muted" style="font-size:12px;margin-bottom:8px">兼容 cloudflare_temp_email：创建地址 + 收信。</div>
       <div class="row">
         <label style="flex:2">API 根地址
           <input type="text" id="custom_api_base" placeholder="https://mail.example.com"/>
@@ -2027,9 +2009,7 @@ INDEX_HTML = r"""
       </div>
     </div>
 
-    <div id="box_tempmail_lol" class="mail-box" style="display:none;margin-top:10px">
-      <div class="muted" style="font-size:12px">TempMail.lol：无需 Key，自动生成邮箱后轮询收信（可能被 xAI 拒绝）。</div>
-    </div>
+    <div id="box_tempmail_lol" class="mail-box" style="display:none;margin-top:10px"></div>
 
     <div id="box_duckmail" class="mail-box" style="display:none;margin-top:10px">
       <div class="row">
@@ -2192,7 +2172,7 @@ INDEX_HTML = r"""
         <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
       </div>
     </div>
-    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选已下载/不需要的 accounts_*.txt，删除后不会再出现在「下载 SSO」合并结果里。</div>
+    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选不需要的文件后可批量删除。</div>
     {% if files %}
     <table>
       <thead>
@@ -2254,10 +2234,26 @@ async function loadEmailConfig(){
     const e=j.email||{};
     const sel=document.getElementById('email_provider');
     sel.innerHTML='';
+    const _groups={};
     (e.choices||[]).forEach(c=>{
-      const o=document.createElement('option');
-      o.value=c.id; o.textContent=c.label;
-      sel.appendChild(o);
+      const g=c.group||'';
+      if(!_groups[g]) _groups[g]=[];
+      _groups[g].push(c);
+    });
+    ['自建','公共','付费',''].forEach(g=>{
+      if(!_groups[g]) return;
+      let parent=sel;
+      if(g){
+        const og=document.createElement('optgroup');
+        og.label=g;
+        sel.appendChild(og);
+        parent=og;
+      }
+      _groups[g].forEach(c=>{
+        const o=document.createElement('option');
+        o.value=c.id; o.textContent=c.label;
+        parent.appendChild(o);
+      });
     });
     let prov=e.provider||'cfworker';
     if(![...sel.options].some(o=>o.value===prov)) prov='cfworker';
@@ -2507,7 +2503,7 @@ async function poll(){
       const q = ws.queued!=null ? (' · 已入队 '+ws.queued) : '';
       const okf = ' · CPA文件 '+(cpa.files||0);
       document.getElementById('upload_hint').textContent =
-        '当前模式：'+mode+src+tot+q+okf+' · 下载按钮只反映当前工作区';
+        '当前模式：'+mode+src+tot+q+okf;
     }
     const box=document.getElementById('logbox');
     const logs=j.logs||[];
