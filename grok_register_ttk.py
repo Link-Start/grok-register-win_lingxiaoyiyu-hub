@@ -129,18 +129,11 @@ DEFAULT_CONFIG = {
     # 注意：公共 Tempmailer / inboxkitten 已因滥用被拒收 xAI 邮件，不再内置
     "email_failover": True,
     "email_providers": [
-        "cfworker","cloudflare","moemail","tempmail_lol","duckmail","gptmail",
+        "cfworker","moemail",
         "maliapi","luckmail","skymail","cloudmail","freemail","opentrashmail","laoudo","yyds",
     ],
     "moemail_api_url": "https://sall.cc",
     "moemail_api_key": "",
-    "gptmail_base_url": "https://mail.chatgpt.org.uk",
-    "gptmail_api_key": "",
-    "gptmail_domain": "",
-    "duckmail_api_url": "https://www.duckmail.sbs",
-    "duckmail_provider_url": "https://api.duckmail.sbs",
-    "duckmail_bearer": "",
-    "duckmail_domain": "",
     "maliapi_base_url": "https://maliapi.215.im/v1",
     "maliapi_api_key": "",
     "maliapi_domain": "",
@@ -1438,7 +1431,7 @@ def email_provider_ready(provider: str) -> bool:
     p = str(provider or "").strip().lower()
     if p in ("tempmailer", "inboxkitten", "inbox_kitten"):
         return False
-    if p in ("tempmail_lol", "moemail", "gptmail", "duckmail"):
+    if p == "moemail":
         return True
     if p in ("cfworker", "cloudflare", "custom"):
         return bool(str(config.get("cfworker_api_url") or config.get("cloudflare_api_base") or "").strip())
@@ -1534,7 +1527,7 @@ def _get_email_and_token_once(provider, api_key=None, log_callback=None):
     if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
         raise Exception(
             "内置公共临时邮已移除：因滥用，Tempmailer 等已拒收 xAI 验证码邮件。"
-            "请在面板下拉选择其它邮箱源（CF Worker / MoeMail / LuckMail / DuckMail 等）。"
+            "请在面板下拉选择其它邮箱源（CF Worker / MoeMail / LuckMail 等）。"
         )
     if mail_providers is not None and mail_providers.import_ok():
         try:
@@ -1545,7 +1538,7 @@ def _get_email_and_token_once(provider, api_key=None, log_callback=None):
                 log_callback=log_callback,
             )
         except Exception as exc:
-            if provider not in ("cloudflare", "cfworker", "custom", "duckmail", "yyds", "maliapi"):
+            if provider not in ("cloudflare", "cfworker", "custom", "yyds", "maliapi"):
                 raise
             if log_callback:
                 log_callback(f"[!] 适配器申请邮箱失败，尝试旧通道: {exc}")
@@ -1662,7 +1655,7 @@ def get_oai_code(
                 proxy=get_configured_proxy(),
             )
         except Exception as exc:
-            if provider not in ("cloudflare", "cfworker", "custom", "duckmail"):
+            if provider not in ("cloudflare", "cfworker", "custom"):
                 raise
             if log_callback:
                 log_callback(f"[!] 适配器收码失败，尝试旧通道: {exc}")

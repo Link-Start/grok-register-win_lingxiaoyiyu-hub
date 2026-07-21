@@ -929,7 +929,9 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
     c = cfg if isinstance(cfg, dict) else load_config()
     provider = str(c.get("email_provider") or "cfworker").strip().lower()
     # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
+    # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                    "tempmail_lol", "duckmail", "gptmail"):
         provider = "cfworker"
     # alias yyds -> maliapi for UI
     if provider == "yyds":
@@ -940,8 +942,6 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         {"id": "moemail", "label": "MoeMail", "group": "自建"},
         {"id": "freemail", "label": "Freemail", "group": "自建"},
         {"id": "opentrashmail", "label": "OpenTrashMail", "group": "自建"},
-        {"id": "duckmail", "label": "DuckMail", "group": "公共"},
-        {"id": "gptmail", "label": "GPTMail", "group": "公共"},
         {"id": "maliapi", "label": "MaliAPI", "group": "付费"},
         {"id": "luckmail", "label": "LuckMail", "group": "付费"},
         {"id": "skymail", "label": "SkyMail", "group": "付费"},
@@ -965,14 +965,6 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         # providers
         "moemail_api_url": str(c.get("moemail_api_url") or "https://sall.cc").strip(),
         "moemail_api_key": str(c.get("moemail_api_key") or "").strip(),
-        "gptmail_base_url": str(c.get("gptmail_base_url") or "https://mail.chatgpt.org.uk").strip(),
-        "gptmail_api_key": str(c.get("gptmail_api_key") or "").strip(),
-        "gptmail_domain": str(c.get("gptmail_domain") or "").strip(),
-        "duckmail_api_url": str(c.get("duckmail_api_url") or "https://www.duckmail.sbs").strip(),
-        "duckmail_provider_url": str(c.get("duckmail_provider_url") or "https://api.duckmail.sbs").strip(),
-        "duckmail_bearer": str(c.get("duckmail_bearer") or "").strip(),
-        "duckmail_domain": str(c.get("duckmail_domain") or "").strip(),
-        "duckmail_api_key": str(c.get("duckmail_api_key") or "").strip(),
         "maliapi_base_url": str(c.get("maliapi_base_url") or "https://maliapi.215.im/v1").strip(),
         "maliapi_api_key": str(c.get("maliapi_api_key") or c.get("yyds_api_key") or "").strip(),
         "maliapi_domain": str(c.get("maliapi_domain") or "").strip(),
@@ -1004,13 +996,15 @@ def apply_email_config_from_ui(data: dict) -> dict:
     cfg = load_config()
     provider = str(data.get("provider") or "cfworker").strip().lower()
     # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
+    # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                    "tempmail_lol", "duckmail", "gptmail"):
         provider = "cfworker"
     if provider == "yyds":
         provider = "maliapi"
 
     valid = {
-        "cfworker", "moemail", "duckmail", "gptmail",
+        "cfworker", "moemail",
         "maliapi", "luckmail", "skymail", "cloudmail", "freemail", "opentrashmail", "laoudo",
     }
     if provider not in valid:
@@ -1035,8 +1029,6 @@ def apply_email_config_from_ui(data: dict) -> dict:
 
     for key in (
         "moemail_api_url", "moemail_api_key",
-        "gptmail_base_url", "gptmail_api_key", "gptmail_domain",
-        "duckmail_api_url", "duckmail_provider_url", "duckmail_bearer", "duckmail_domain", "duckmail_api_key",
         "maliapi_base_url", "maliapi_api_key", "maliapi_domain",
         "luckmail_base_url", "luckmail_api_key", "luckmail_project_code", "luckmail_domain",
         "skymail_api_base", "skymail_token", "skymail_domain",
@@ -1405,12 +1397,14 @@ def _run_one_round(round_no: int, total: int) -> bool:
         mail_cfg = load_config()
         mail_prov = str(mail_cfg.get("email_provider") or "cfworker").strip().lower()
         # cloudflare/custom/tempmailer are all aliases of cfworker
-        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
+        # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                         "tempmail_lol", "duckmail", "gptmail"):
             mail_prov = "cfworker"
         if mail_prov == "yyds":
             mail_prov = "maliapi"
         # no-key providers
-        free_ok = mail_prov in ("moemail", "gptmail", "duckmail")
+        free_ok = mail_prov in ("moemail",)
         has_cf = bool(str(mail_cfg.get("cfworker_api_url") or mail_cfg.get("cloudflare_api_base") or "").strip())
         has_luck = bool(str(mail_cfg.get("luckmail_api_key") or "").strip())
         has_mali = bool(str(mail_cfg.get("maliapi_api_key") or mail_cfg.get("yyds_api_key") or "").strip())
@@ -1944,42 +1938,6 @@ INDEX_HTML = r"""
       </div>
     </div>
 
-    <div id="box_duckmail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label>Web URL
-          <input type="text" id="duckmail_api_url" placeholder="https://www.duckmail.sbs"/>
-        </label>
-        <label>Provider URL
-          <input type="text" id="duckmail_provider_url" placeholder="https://api.duckmail.sbs"/>
-        </label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label>Bearer
-          <input type="password" id="duckmail_bearer" placeholder="可选"/>
-        </label>
-        <label>API Key
-          <input type="password" id="duckmail_api_key" placeholder="可选"/>
-        </label>
-        <label>域名
-          <input type="text" id="duckmail_domain" placeholder="可选"/>
-        </label>
-      </div>
-    </div>
-
-    <div id="box_gptmail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="gptmail_base_url" placeholder="https://mail.chatgpt.org.uk"/>
-        </label>
-        <label>API Key
-          <input type="password" id="gptmail_api_key" placeholder="可选"/>
-        </label>
-        <label>域名
-          <input type="text" id="gptmail_domain" placeholder="可选，填了则本地拼地址"/>
-        </label>
-      </div>
-    </div>
-
     <div id="box_maliapi" class="mail-box" style="display:none;margin-top:10px">
       <div class="row">
         <label style="flex:2">API URL
@@ -2164,7 +2122,7 @@ async function loadEmailConfig(){
       if(!_groups[g]) _groups[g]=[];
       _groups[g].push(c);
     });
-    ['自建','公共','付费',''].forEach(g=>{
+    ['自建','付费',''].forEach(g=>{
       if(!_groups[g]) return;
       let parent=sel;
       if(g){
@@ -2190,14 +2148,6 @@ async function loadEmailConfig(){
     _set('cfworker_subdomain', e.cfworker_subdomain);
     _set('moemail_api_url', e.moemail_api_url||'https://sall.cc');
     _set('moemail_api_key', e.moemail_api_key);
-    _set('gptmail_base_url', e.gptmail_base_url||'https://mail.chatgpt.org.uk');
-    _set('gptmail_api_key', e.gptmail_api_key);
-    _set('gptmail_domain', e.gptmail_domain);
-    _set('duckmail_api_url', e.duckmail_api_url||'https://www.duckmail.sbs');
-    _set('duckmail_provider_url', e.duckmail_provider_url||'https://api.duckmail.sbs');
-    _set('duckmail_bearer', e.duckmail_bearer);
-    _set('duckmail_api_key', e.duckmail_api_key);
-    _set('duckmail_domain', e.duckmail_domain);
     _set('maliapi_base_url', e.maliapi_base_url||'https://maliapi.215.im/v1');
     _set('maliapi_api_key', e.maliapi_api_key);
     _set('maliapi_domain', e.maliapi_domain);
@@ -2238,14 +2188,6 @@ async function saveEmailConfig(){
     cfworker_subdomain: _val('cfworker_subdomain'),
     moemail_api_url: _val('moemail_api_url'),
     moemail_api_key: _val('moemail_api_key'),
-    gptmail_base_url: _val('gptmail_base_url'),
-    gptmail_api_key: _val('gptmail_api_key'),
-    gptmail_domain: _val('gptmail_domain'),
-    duckmail_api_url: _val('duckmail_api_url'),
-    duckmail_provider_url: _val('duckmail_provider_url'),
-    duckmail_bearer: _val('duckmail_bearer'),
-    duckmail_api_key: _val('duckmail_api_key'),
-    duckmail_domain: _val('duckmail_domain'),
     maliapi_base_url: _val('maliapi_base_url'),
     maliapi_api_key: _val('maliapi_api_key'),
     maliapi_domain: _val('maliapi_domain'),

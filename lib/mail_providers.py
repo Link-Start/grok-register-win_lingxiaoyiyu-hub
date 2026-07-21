@@ -3,7 +3,7 @@
 """Multi mailbox provider adapter (any-auto-register base_mailbox).
 
 Used by grok_register_ttk to support dropdown providers:
-  cfworker, cloudflare, moemail, tempmail_lol, duckmail, gptmail,
+  cfworker, moemail,
   maliapi, luckmail, skymail, cloudmail, freemail, opentrashmail, laoudo
 """
 
@@ -35,11 +35,7 @@ except Exception as exc:
 
 MAIL_PROVIDER_CHOICES = [
     ("cfworker", "CF Worker / 自建域名"),
-    ("cloudflare", "自定义 cloudflare_temp_email"),
     ("moemail", "MoeMail (sall.cc)"),
-    ("tempmail_lol", "TempMail.lol（自动生成）"),
-    ("duckmail", "DuckMail"),
-    ("gptmail", "GPTMail"),
     ("maliapi", "YYDS / MaliAPI"),
     ("luckmail", "LuckMail（接码/买邮）"),
     ("skymail", "SkyMail"),
@@ -69,8 +65,13 @@ def normalize_provider(name: str) -> str:
         "cloudflare_temp_email": "cfworker",
         "cf-worker": "cfworker",
         "cf_worker": "cfworker",
-        "tempmail": "tempmail_lol",
-        "tempmail.lol": "tempmail_lol",
+        "cloudflare": "cfworker",
+        # removed public providers (xAI 拒收), fall back to cfworker
+        "tempmail": "cfworker",
+        "tempmail.lol": "cfworker",
+        "tempmail_lol": "cfworker",
+        "duckmail": "cfworker",
+        "gptmail": "cfworker",
         "yyds": "maliapi",
         "yy ds": "maliapi",
     }
@@ -141,7 +142,7 @@ def provider_ready(config: dict, provider: str) -> bool:
     p = normalize_provider(provider)
     if p in ("tempmailer", "inboxkitten", "inbox_kitten"):
         return False
-    if p in ("tempmail_lol", "moemail", "gptmail", "duckmail"):
+    if p == "moemail":
         return True
     if p == "maliapi":
         return bool(
@@ -171,7 +172,7 @@ def make_mailbox(config: dict, provider: str, proxy: str = "", log_callback=None
     if not import_ok():
         raise RuntimeError(f"base_mailbox 未加载: {_IMPORT_ERR}")
     prov = normalize_provider(provider)
-    factory = "cfworker" if prov in ("cloudflare", "custom") else prov
+    factory = prov
     extra = extra_from_config(config)
     box = bm.create_mailbox(factory, extra=extra, proxy=proxy or None)
     try:

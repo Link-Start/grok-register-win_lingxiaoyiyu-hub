@@ -6,7 +6,7 @@
 
 ### Windows 下双击即用的 Grok（xAI）账号自动注册面板
 
-[![Version](https://img.shields.io/badge/version-v1.3.1-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
+[![Version](https://img.shields.io/badge/version-v1.4.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=for-the-badge)](#环境要求)
 [![Python](https://img.shields.io/badge/python-3.10+-yellow?style=for-the-badge)](https://www.python.org/downloads/)
@@ -63,7 +63,7 @@
 
 - **🌐 代理**：复用本机 Clash，自动探测端口（Clash Verge 默认 `7897`）
 - **🤖 注册引擎**：Chromium 有头 / Camoufox 无头反检测，面板下拉切换
-- **📧 邮箱**：面板下拉多邮箱源（CF Worker / MoeMail / TempMail.lol / DuckMail / GPTMail / LuckMail / MaliAPI 等）；公共 Tempmailer 已移除
+- **📧 邮箱**：面板下拉多邮箱源（CF Worker / MoeMail / LuckMail / MaliAPI / SkyMail / CloudMail / Freemail / OpenTrashMail / Laoudo）；公共邮箱源（TempMail.lol / DuckMail / GPTMail）已全部移除
 - **🔄 SSO → CPA**：注册成功后自动把 web SSO 换成 CLIProxyAPI 可用的 OAuth JSON
 - **⬆ 上传 SSO 续期**：面板上传 SSO txt / CPA `all.json`（含 `sso` 字段），整批换票生成新 CPA；旧数据归档到 `data/archive/`
 - **🔞 NSFW 自动开启**：注册成功后自动设置 ToS、生日、NSFW 偏好
@@ -129,7 +129,7 @@
 | `proxy` | Clash 代理地址；端口不通时启动会自动探测并写回 |
 | `allow_proxy_fallback` | 代理失败是否回退直连，默认 `false` |
 | `browser_engine` | `chromium`（有头，默认）或 `camoufox`（无头反检测） |
-| `email_provider` | 邮箱源 id（如 `cfworker` / `moemail` / `tempmail_lol` / `luckmail`） |
+| `email_provider` | 邮箱源 id（如 `cfworker` / `moemail` / `luckmail` / `maliapi`） |
 | `cfworker_api_url` | CF Worker / 自建 API 根地址（选 cfworker 时） |
 | `cfworker_admin_token` | 管理 Token |
 | `cfworker_domain` | 邮箱域名 |
@@ -137,24 +137,21 @@
 | `register_count` | 单次任务注册数量 |
 | `round_timeout_sec` | 单账号整轮硬超时（秒），默认 `300`；超时杀进程并进入下一轮 |
 
-完整字段见 `config.example.json`（含 MoeMail / DuckMail / LuckMail / GPTMail 等）。
+完整字段见 `config.example.json`（含 MoeMail / LuckMail / MaliAPI 等）。
 
 ### 📧 邮箱（重要）
 
-> **内置公共 Tempmailer 已移除。**
-> 因大规模滥用，公共临时邮可能拒收 xAI 验证码（提示类似：
+> **公共邮箱源已全部移除。**
+> 因大规模滥用，公共临时邮（TempMail.lol / DuckMail / GPTMail / Tempmailer）均已拒收 xAI 验证码（提示类似：
 > `Due to recent large-scale abuse, emails from xAI are temporarily not accepted.`）
+> 请使用自建或付费邮箱源。
 
 面板「邮箱服务」下拉可选（对齐 any-auto-register 接码体系）：
 
 | 标识 | 名称 | 说明 |
 | :--- | :--- | :--- |
 | `cfworker` | CF Worker / 自建域名 | **推荐**，需 API URL + Admin Token |
-| `cloudflare` | cloudflare_temp_email | 自建兼容接口（路径可配） |
 | `moemail` | MoeMail | 临时邮 API（sall.cc 等） |
-| `tempmail_lol` | TempMail.lol | 免 key 自动生成（可能被 xAI 拒） |
-| `duckmail` | DuckMail | 临时邮 |
-| `gptmail` | GPTMail | 第三方 API |
 | `maliapi` | YYDS / MaliAPI | 接码/邮箱 API |
 | `luckmail` | LuckMail | 接码/买邮平台 |
 | `skymail` / `cloudmail` | SkyMail / CloudMail | API + Token/账号 |
@@ -164,7 +161,7 @@
 
 收码流程：申请邮箱 → 快照旧信 `before_ids` → 轮询收信 → 提取 Grok 验证码（`ABC-DEF`）。
 
-**建议优先自建（cfworker / cloudflare_temp_email）**；公共源仅作备选，不保证能收 xAI 信。
+**建议优先自建（cfworker）**；`cloudflare` / `custom` / `tempmailer` 等旧标识自动作为 cfworker 别名兼容。
 
 ### 🌍 环境变量（高级）
 
@@ -248,14 +245,14 @@ grok-register-win/
 
 - 请使用 **v1.2.0+**，并强制刷新面板（Ctrl+F5）
 - 旧版若残留重复 `saveEmailConfig` 会把所有源保存成 custom 导致失败
-- 选 CF Worker / LuckMail 等需填写对应 API/Key；TempMail.lol / MoeMail 可先空 Key 保存
+- 选 CF Worker / LuckMail 等需填写对应 API/Key；MoeMail 可先空 Key 保存
 </details>
 
 <details>
 <summary><b>🔏 验证码收不到 / xAI 拒信</b></summary>
 <br>
 
-- 公共临时邮可能直接拒收 xAI 邮件（含 TempMail.lol）
+- 公共临时邮已全部移除（TempMail.lol / DuckMail / GPTMail 均被 xAI 拒收）
 - 换 **CF Worker 自建域名** 或其它可用源后重试
 - 节点优先日本
 </details>
@@ -285,6 +282,12 @@ grok-register-win/
 
 <details>
 <summary><b>查看完整更新日志</b></summary>
+
+### v1.4.0（2026-07-21）
+- **移除全部公共邮箱源**：TempMail.lol / DuckMail / GPTMail 均因 xAI 拒收验证码而移除
+- **邮箱配置层重构**：`cloudflare` / `custom` / `tempmailer` 等旧标识统一作为 `cfworker` 别名（同一协议），删除重复的下拉项与独立配置框
+- 面板邮箱下拉只保留自建与付费源：CF Worker / MoeMail / MaliAPI / LuckMail / SkyMail / CloudMail / Freemail / OpenTrashMail / Laoudo
+- 已配置旧公共源的用户自动回退到 cfworker，不会报错
 
 ### v1.3.1（2026-07-20）
 - **下载对齐面板**：CPA / Sub2 只打包当前面板账号；删除账号文件时同步清理无主 CPA

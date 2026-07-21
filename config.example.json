@@ -11,12 +11,8 @@
   "email_providers": [
     "cfworker",
     "moemail",
-    "tempmail_lol",
-    "duckmail",
-    "gptmail",
     "maliapi",
-    "luckmail",
-    "cloudflare"
+    "luckmail"
   ],
   "cfworker_api_url": "",
   "cfworker_admin_token": "",
@@ -29,11 +25,6 @@
   "cloudflare_path_token": "/api/token",
   "moemail_api_url": "https://sall.cc",
   "moemail_api_key": "",
-  "gptmail_base_url": "https://mail.chatgpt.org.uk",
-  "gptmail_api_key": "",
-  "duckmail_api_url": "https://www.duckmail.sbs",
-  "duckmail_provider_url": "https://api.duckmail.sbs",
-  "duckmail_api_key": "",
   "maliapi_base_url": "https://maliapi.215.im/v1",
   "maliapi_api_key": "",
   "luckmail_base_url": "https://mails.luckyous.com/",
