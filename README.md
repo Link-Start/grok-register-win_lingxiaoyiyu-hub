@@ -6,7 +6,7 @@
 
 ### Windows 下双击即用的 Grok（xAI）账号自动注册面板
 
-[![Version](https://img.shields.io/badge/version-v1.4.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
+[![Version](https://img.shields.io/badge/version-v2.0.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=for-the-badge)](#环境要求)
 [![Python](https://img.shields.io/badge/python-3.10+-yellow?style=for-the-badge)](https://www.python.org/downloads/)
@@ -282,6 +282,14 @@ grok-register-win/
 
 <details>
 <summary><b>查看完整更新日志</b></summary>
+
+### v2.0.0（2026-07-21）
+- **面板 UI 全面重做**：从深色科技蓝渐变改为暖米色「Atelier 简约工坊」风格
+  - 字体：Bricolage Grotesque + IBM Plex Sans/Mono + Noto Sans SC（中文字体回退）
+  - 配色：暖米纸底 `#f7f4ed` + 铁锈红强调 `#c8351a` + 1px 细线 + 2px 微圆角
+  - 布局：黑色通栏顶栏 + 6 格统计带 + 无缝卡片堆叠 + 终端式深色日志
+- **全中文化**：所有界面文案改为中文（保留 CF Worker / SSO / CPA / API URL / OAuth 等技术专有名词）
+- 功能逻辑零改动：全部 id、API 调用、Jinja 变量、JS 函数原样保留
 
 ### v1.4.0（2026-07-21）
 - **移除全部公共邮箱源**：TempMail.lol / DuckMail / GPTMail 均因 xAI 拒收验证码而移除
