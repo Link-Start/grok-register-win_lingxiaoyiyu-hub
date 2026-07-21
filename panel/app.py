@@ -1772,281 +1772,321 @@ INDEX_HTML = r"""
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Grok Register 面板</title>
+  <title>Grok 注册控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root{
-      --bg:#0b0e14;--bg2:#0f131c;--card:#141a26;--card2:#1a2130;--fg:#eef2fb;--muted:#8b97b0;--muted2:#6b7793;
-      --accent:#6ea8fe;--accent2:#4f8cff;--ok:#3dd68c;--bad:#ff7b7b;--warn:#ffb454;
-      --line:#222b3d;--line2:#2c3650;--chip:#1c2434;--chip2:#222c40;
+      --paper:#f7f4ed;--paper-2:#efebe0;--ink:#1a1a18;--ink-2:#2a2a26;
+      --steel:#6b685f;--steel-2:#9a968a;--line:#d8d3c4;
+      --rust:#c8351a;--amber:#d98324;--ok:#2f6b2f;
+      --log-bg:#1a1a18;--log-fg:#d8d3c4;--log-dim:#9a968a;
+      --font-display:"Bricolage Grotesque","Noto Sans SC",sans-serif;
+      --font-body:"IBM Plex Sans","Noto Sans SC",sans-serif;
+      --font-mono:"IBM Plex Mono","Noto Sans SC",monospace;
     }
     *{box-sizing:border-box}
-    body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:
-      radial-gradient(1200px 600px at 12% -18%,#1a2540 0%,transparent 55%),
-      radial-gradient(900px 500px at 92% 8%,#1a1f3a 0%,transparent 50%),
-      var(--bg);color:var(--fg);min-height:100vh;-webkit-font-smoothing:antialiased}
-    .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
-    header{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--line)}
-    .brand{display:flex;align-items:center;gap:14px}
-    .logo{width:42px;height:42px;border-radius:12px;background:#000;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;flex-shrink:0;box-shadow:0 6px 18px rgba(0,0,0,.35);letter-spacing:-1px}
-    h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.3px} .sub{color:var(--muted);font-size:12.5px;margin-top:3px}
-    .actions{display:flex;flex-wrap:wrap;gap:10px}
-    a.btn,button.btn{border:1px solid var(--line2);background:var(--chip);color:var(--fg);padding:10px 14px;border-radius:10px;text-decoration:none;font-size:13px;cursor:pointer;transition:all .15s ease;display:inline-flex;align-items:center;gap:6px}
-    a.btn:hover,button.btn:hover{background:var(--chip2);border-color:var(--accent);transform:translateY(-1px)}
-    a.btn:active,button.btn:active{transform:translateY(0)}
-    a.btn.primary,button.btn.primary{background:linear-gradient(135deg,var(--accent2),var(--accent));border-color:transparent;color:#fff;font-weight:600;box-shadow:0 4px 12px rgba(79,140,255,.3)}
-    a.btn.primary:hover,button.btn.primary:hover{box-shadow:0 6px 18px rgba(79,140,255,.45)}
-    a.btn.ok,button.btn.ok{background:linear-gradient(135deg,#1f9d63,#3dd68c);border:0;color:#042;font-weight:600;box-shadow:0 4px 12px rgba(61,214,140,.25)}
-    a.btn.ok:hover,button.btn.ok:hover{box-shadow:0 6px 18px rgba(61,214,140,.4)}
-    a.btn.sub2,button.btn.sub2{background:linear-gradient(135deg,#6d28d9,#a78bfa);border:0;color:#fff;font-weight:600;box-shadow:0 4px 12px rgba(167,139,250,.28)}
-    a.btn.sub2:hover,button.btn.sub2:hover{box-shadow:0 6px 18px rgba(167,139,250,.45)}
-    a.btn.danger,button.btn.danger{background:#2a1717;border-color:#5a2b2b;color:#ffb4b4}
-    a.btn.danger:hover,button.btn.danger:hover{background:#381c1c}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0 20px}
-    .stat{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .15s}
-    .stat:hover{border-color:var(--accent)}
-    .stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.7}
-    .stat .k{color:var(--muted2);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
-    .stat .v{font-size:22px;font-weight:700;margin-top:6px;color:var(--fg)}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,.15)}
-    .card h2{margin:0 0 14px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
-    .card h2::before{content:"";width:3px;height:14px;background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:2px}
-    .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
-    label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
-    input,select{background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:10px 12px;min-width:150px;font-size:13px;transition:border-color .15s;font-family:inherit}
-    input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
+    body{margin:0;font-family:var(--font-body);background:var(--paper);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+    .wrap{max-width:1240px;margin:0 auto;padding:0 20px 56px}
+
+    header{display:flex;align-items:stretch;flex-wrap:wrap;border:1px solid var(--ink);background:var(--ink);color:var(--paper)}
+    .brand{display:flex;align-items:center;gap:14px;padding:14px 18px;flex:1}
+    .logo{width:38px;height:38px;border:1px solid var(--paper);display:grid;place-items:center;font-family:var(--font-display);font-weight:800;font-size:20px;background:var(--rust);color:var(--paper);letter-spacing:-1px;flex-shrink:0}
+    h1{margin:0;font-family:var(--font-display);font-weight:800;font-size:24px;letter-spacing:-.5px;line-height:1}
+    h1 .slash{color:var(--rust)}
+    .sub{font-family:var(--font-mono);font-size:11px;color:#9a968a;margin-top:4px;letter-spacing:.5px}
+    .actions{display:flex;flex-wrap:wrap;align-items:stretch}
+    .actions .btn{border:0;border-right:1px solid var(--paper);background:transparent;color:var(--paper);padding:14px 18px;border-radius:0;text-decoration:none;font-family:var(--font-body);font-size:12.5px;font-weight:500;cursor:pointer;transition:background .12s;display:inline-flex;align-items:center;gap:6px}
+    .actions .btn:last-child{border-right:0}
+    .actions .btn:hover{background:var(--rust)}
+
+    a.btn,button.btn{border:1px solid var(--ink);background:var(--paper);color:var(--ink);padding:10px 16px;border-radius:2px;text-decoration:none;font-size:12.5px;font-family:var(--font-body);font-weight:500;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:6px}
+    a.btn:hover,button.btn:hover{background:var(--ink);color:var(--paper)}
+    a.btn:active,button.btn:active{transform:translateY(1px)}
+    a.btn.primary,button.btn.primary{background:var(--rust);color:var(--paper);border-color:var(--ink)}
+    a.btn.primary:hover,button.btn.primary:hover{background:var(--ink)}
+    a.btn.ok,button.btn.ok{background:var(--ok);color:#fff;border-color:var(--ink)}
+    a.btn.ok:hover,button.btn.ok:hover{background:var(--ink)}
+    a.btn.sub2,button.btn.sub2{background:var(--amber);color:var(--ink);border-color:var(--ink)}
+    a.btn.sub2:hover,button.btn.sub2:hover{background:var(--ink);color:var(--paper)}
+    a.btn.danger,button.btn.danger{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+    a.btn.danger:hover,button.btn.danger:hover{background:var(--rust)}
+    button.btn:disabled{opacity:.4;cursor:not-allowed}
+
+    .grid{display:grid;grid-template-columns:repeat(6,1fr);border:1px solid var(--ink);border-top:0;background:var(--paper)}
+    .stat{border-right:1px solid var(--ink);padding:16px;background:var(--paper)}
+    .stat:last-child{border-right:0}
+    .stat .k{font-family:var(--font-body);font-size:11px;color:var(--steel);letter-spacing:.3px}
+    .stat .v{font-family:var(--font-display);font-weight:700;font-size:30px;line-height:1;margin-top:10px;letter-spacing:-1px;color:var(--ink)}
+    .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--steel-2);vertical-align:middle}
+    .dot.run{background:var(--ok);box-shadow:0 0 0 2px rgba(47,107,47,.15);animation:pulse 1.4s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+    .card{border:1px solid var(--ink);border-top:0;background:var(--paper);position:relative}
+    .card h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--line);font-family:var(--font-display);font-weight:600;font-size:16px;display:flex;align-items:center;gap:10px}
+    .card h2::before{content:"";width:3px;height:14px;background:var(--rust);border-radius:1px}
+    .card-body{padding:20px 16px}
+
+    .row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end}
+    label{display:flex;flex-direction:column;gap:6px;font-family:var(--font-body);font-size:11.5px;color:var(--steel)}
+    input,select{background:var(--paper);border:1px solid var(--line);color:var(--ink);border-radius:2px;padding:10px 12px;min-width:150px;font-size:13px;font-family:var(--font-mono);appearance:none;outline:none}
+    input:focus,select:focus{border-color:var(--ink)}
+    select{background-image:linear-gradient(45deg,transparent 50%,var(--ink) 50%),linear-gradient(135deg,var(--ink) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
+    input[type=number]{font-weight:500}
+    input[type=checkbox]{width:16px;height:16px;min-width:0;accent-color:var(--rust)}
+    input[type=file]{min-width:200px}
+
+    .mail-box{display:none;margin-top:14px;border:1px solid var(--line);padding:14px;background:var(--paper)}
+
+    .muted{color:var(--steel);font-size:12px}
+    .hint-box{font-family:var(--font-body);font-size:12px;color:var(--steel);border-left:2px solid var(--ink);background:transparent;padding:6px 14px;margin:12px 0;line-height:1.7}
+    code{background:var(--paper-2);padding:1px 5px;border-radius:2px;font-family:var(--font-mono);font-size:11px;color:var(--ink)}
+
+    #logbox{height:340px;overflow:auto;background:var(--log-bg);color:var(--log-fg);border:1px solid var(--ink);border-top:0;border-radius:0;padding:16px 18px;font-family:var(--font-mono);font-size:12px;line-height:1.7;white-space:pre-wrap}
+    #logbox::-webkit-scrollbar{width:10px}
+    #logbox::-webkit-scrollbar-track{background:var(--ink-2)}
+    #logbox::-webkit-scrollbar-thumb{background:var(--steel-2)}
+
     table{width:100%;border-collapse:collapse}
-    th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
-    th{color:var(--muted);background:var(--bg2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
-    tbody tr{transition:background .12s}
-    tbody tr:hover{background:rgba(110,168,254,.04)}
-    .mono{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;word-break:break-all;font-size:12.5px}
-    .muted{color:var(--muted)} .tag{display:inline-block;padding:3px 10px;border-radius:999px;background:var(--chip);color:var(--accent);font-size:12px;font-weight:500}
-    #logbox{height:340px;overflow:auto;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;color:var(--muted)}
-    #logbox::-webkit-scrollbar{width:8px}
-    #logbox::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
-    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;background:#555;vertical-align:middle}
-    .dot.run{background:var(--ok);box-shadow:0 0 10px var(--ok);animation:pulse 1.5s ease-in-out infinite}
-    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
-    .toast{position:fixed;right:20px;bottom:20px;background:var(--card2);border:1px solid var(--line2);padding:12px 16px;border-radius:10px;display:none;z-index:9;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13px}
-    code{background:var(--chip);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--accent)}
-    @media(max-width:800px){ th:nth-child(3),td:nth-child(3){display:none} .row{flex-direction:column;align-items:stretch} input,select{min-width:0} }
+    th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:12.5px;vertical-align:middle}
+    th{font-family:var(--font-body);font-size:11px;font-weight:500;color:var(--steel);background:var(--paper);border-bottom:1px solid var(--ink)}
+    tbody tr:hover{background:var(--paper-2)}
+    .mono{font-family:var(--font-mono);word-break:break-all}
+    .tag{display:inline-block;padding:2px 8px;border:1px solid var(--line);border-radius:2px;font-family:var(--font-mono);font-size:11px;font-weight:500;color:var(--ink)}
+
+    .toast{position:fixed;right:24px;bottom:24px;background:var(--ink);color:var(--paper);border:1px solid var(--ink);padding:12px 18px;border-radius:0;font-family:var(--font-body);font-size:12px;display:none;z-index:50}
+
+    @media(max-width:900px){
+      .grid{grid-template-columns:repeat(3,1fr)}
+      .stat:nth-child(3){border-right:0}
+      .row{flex-direction:column;align-items:stretch}
+      input,select{min-width:0}
+      .actions{width:100%}
+      .actions .btn{flex:1;justify-content:center}
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
+
   <header>
     <div class="brand">
       <div class="logo">G</div>
       <div>
-        <h1>Grok Register</h1>
-        <div class="sub">{{ base_dir }} · 代理走本机 Clash（Clash Verge 默认 7897）</div>
+        <h1>GROK<span class="slash">//</span>注册控制台</h1>
+        <div class="sub">{{ base_dir }} · 本机代理 Clash 7897</div>
       </div>
     </div>
     <div class="actions">
-      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">⬇ 下载 SSO (TXT)</a>
-      <a class="btn ok" href="/download/cpa.zip" title="CPA OAuth JSON（CLIProxyAPI 可用）">⬇ 下载 CPA (JSON)</a>
-      <a class="btn sub2" href="/download/sub2.zip" title="Sub2API 官方导入包 type=sub2api-data：单账号 JSON + all 合集">⬇ 下载 Sub2 (JSON)</a>
+      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">⬇ SSO 账号包</a>
+      <a class="btn ok" href="/download/cpa.zip" title="CPA OAuth JSON（CLIProxyAPI 可用）">⬇ CPA 凭证</a>
+      <a class="btn sub2" href="/download/sub2.zip" title="Sub2API 官方导入包">⬇ Sub2 导入包</a>
     </div>
   </header>
 
   <div class="grid">
     <div class="stat"><div class="k">文件数</div><div class="v" id="st_files">{{ file_count }}</div></div>
     <div class="stat"><div class="k">SSO 账号</div><div class="v" id="st_accounts">{{ account_count }}</div></div>
-    <div class="stat"><div class="k">CPA 已转换</div><div class="v" id="st_cpa_ok">{{ cpa_files }}</div></div>
+    <div class="stat"><div class="k">已转 CPA</div><div class="v" id="st_cpa_ok">{{ cpa_files }}</div></div>
     <div class="stat"><div class="k">CPA 队列</div><div class="v" style="font-size:16px" id="st_cpa_q">0 / 0 / 0</div></div>
     <div class="stat"><div class="k">任务状态</div><div class="v" style="font-size:16px"><span class="dot" id="st_dot"></span><span id="st_status">idle</span></div></div>
     <div class="stat"><div class="k">注册 成功/失败</div><div class="v" style="font-size:16px"><span id="st_sf">0 / 0</span></div></div>
   </div>
 
   <div class="card">
-    <h2>启动注册</h2>
-    <div class="row">
-      <label>轮数
-        <input type="number" id="count" min="1" max="500" value="1"/>
-      </label>
-      <label>浏览器引擎
-        <select id="browser_engine" onchange="saveBrowserEngine()">
-          <option value="chromium">Chromium 有头（默认）</option>
-          <option value="camoufox">Camoufox 无头（反检测 Firefox）</option>
-        </select>
-      </label>
-      <button class="btn ok" id="btn_start" onclick="startJob()">▶ 开始注册</button>
-      <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
-      <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">补转未转换 CPA</button>
+    <h2>注册引擎</h2>
+    <div class="card-body">
+      <div class="row">
+        <label>轮数
+          <input type="number" id="count" min="1" max="500" value="1"/>
+        </label>
+        <label>浏览器引擎
+          <select id="browser_engine" onchange="saveBrowserEngine()">
+            <option value="chromium">Chromium 有头（默认）</option>
+            <option value="camoufox">Camoufox 无头（反检测）</option>
+          </select>
+        </label>
+        <button class="btn ok" id="btn_start" onclick="startJob()">▶ 开始注册</button>
+        <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
+        <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">⟳ 补转 CPA</button>
+      </div>
+      <div class="muted" style="margin-top:10px" id="cpa_hint">代理走本机 Clash · 注册成功后自动转 CPA</div>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">代理走本机 Clash · 注册成功后自动转 CPA</div>
   </div>
 
   <div class="card">
-    <h2>上传 SSO → CPA / Sub2</h2>
-    <div class="muted" style="font-size:12px;margin:0 0 10px;line-height:1.55;padding:10px 12px;border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:10px">
-      支持 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO。上传会整批替换当前工作区（旧数据归档到 <code>data/archive/</code>）。
-    </div>
-    <div class="row">
-      <label style="flex:2">SSO 文件
-        <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
-      </label>
-      <button class="btn primary" id="btn_upload_convert" onclick="uploadSsoConvert()">⬆ 上传并转换</button>
-    </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="upload_hint">
-      当前模式：注册 · 未上传批次
+    <h2>SSO 续期上传</h2>
+    <div class="card-body">
+      <div class="hint-box">支持 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO。上传会整批替换当前工作区（旧数据归档到 <code>data/archive/</code>）。</div>
+      <div class="row">
+        <label style="flex:2">SSO 文件
+          <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
+        </label>
+        <button class="btn primary" id="btn_upload_convert" onclick="uploadSsoConvert()">⬆ 上传并转换</button>
+      </div>
+      <div class="muted" style="margin-top:10px" id="upload_hint">
+        当前模式：注册 · 未上传批次
+      </div>
     </div>
   </div>
 
   <div class="card">
     <h2>邮箱服务</h2>
-    <div class="row">
-      <label>邮箱源
-        <select id="email_provider" onchange="onEmailProviderChange()"></select>
-      </label>
-      <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
-        <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
-      </label>
-      <button class="btn primary" onclick="saveEmailConfig()">保存邮箱设置</button>
-    </div>
-
-    <div id="box_cfworker" class="mail-box" style="display:none;margin-top:10px">
+    <div class="card-body">
       <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="cfworker_api_url" placeholder="https://apimail.example.com"/>
+        <label>邮箱源
+          <select id="email_provider" onchange="onEmailProviderChange()"></select>
         </label>
-        <label>Admin Token
-          <input type="password" id="cfworker_admin_token" placeholder="管理员密钥"/>
+        <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
+          <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
         </label>
+        <button class="btn primary" onclick="saveEmailConfig()">💾 保存邮箱设置</button>
       </div>
-      <div class="row" style="margin-top:8px">
-        <label>域名
-          <input type="text" id="cfworker_domain" placeholder="mail.example.com"/>
-        </label>
-        <label>站点密码
-          <input type="password" id="cfworker_custom_auth" placeholder="可选"/>
-        </label>
-        <label>子域名
-          <input type="text" id="cfworker_subdomain" placeholder="可选"/>
-        </label>
-      </div>
-    </div>
 
-    <div id="box_moemail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="moemail_api_url" placeholder="https://sall.cc"/>
-        </label>
-        <label>API Key
-          <input type="password" id="moemail_api_key" placeholder="可选"/>
-        </label>
+      <div id="box_cfworker" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="cfworker_api_url" placeholder="https://apimail.example.com"/>
+          </label>
+          <label>管理员令牌
+            <input type="password" id="cfworker_admin_token" placeholder="管理员密钥"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>域名
+            <input type="text" id="cfworker_domain" placeholder="mail.example.com"/>
+          </label>
+          <label>站点密码
+            <input type="password" id="cfworker_custom_auth" placeholder="可选"/>
+          </label>
+          <label>子域名
+            <input type="text" id="cfworker_subdomain" placeholder="可选"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div id="box_maliapi" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="maliapi_base_url" placeholder="https://maliapi.215.im/v1"/>
-        </label>
-        <label>API Key
-          <input type="password" id="maliapi_api_key"/>
-        </label>
-        <label>域名
-          <input type="text" id="maliapi_domain" placeholder="可选"/>
-        </label>
+      <div id="box_moemail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="moemail_api_url" placeholder="https://sall.cc"/>
+          </label>
+          <label>API Key
+            <input type="password" id="moemail_api_key" placeholder="可选"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div id="box_luckmail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">平台地址
-          <input type="text" id="luckmail_base_url" placeholder="https://mails.luckyous.com"/>
-        </label>
-        <label>API Key
-          <input type="password" id="luckmail_api_key"/>
-        </label>
+      <div id="box_maliapi" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="maliapi_base_url" placeholder="https://maliapi.215.im/v1"/>
+          </label>
+          <label>API Key
+            <input type="password" id="maliapi_api_key"/>
+          </label>
+          <label>域名
+            <input type="text" id="maliapi_domain" placeholder="可选"/>
+          </label>
+        </div>
       </div>
-      <div class="row" style="margin-top:8px">
-        <label>项目代码
-          <input type="text" id="luckmail_project_code" placeholder="grok"/>
-        </label>
-        <label>域名
-          <input type="text" id="luckmail_domain" placeholder="可选"/>
-        </label>
-      </div>
-    </div>
 
-    <div id="box_skymail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API Base
-          <input type="text" id="skymail_api_base" placeholder="https://api.skymail.ink"/>
-        </label>
-        <label>Token
-          <input type="password" id="skymail_token"/>
-        </label>
-        <label>域名
-          <input type="text" id="skymail_domain"/>
-        </label>
+      <div id="box_luckmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">平台地址
+            <input type="text" id="luckmail_base_url" placeholder="https://mails.luckyous.com"/>
+          </label>
+          <label>API Key
+            <input type="password" id="luckmail_api_key"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>项目代码
+            <input type="text" id="luckmail_project_code" placeholder="grok"/>
+          </label>
+          <label>域名
+            <input type="text" id="luckmail_domain" placeholder="可选"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div id="box_cloudmail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API Base
-          <input type="text" id="cloudmail_api_base"/>
-        </label>
-        <label>管理员邮箱
-          <input type="text" id="cloudmail_admin_email"/>
-        </label>
-        <label>管理员密码
-          <input type="password" id="cloudmail_admin_password"/>
-        </label>
+      <div id="box_skymail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API 地址
+            <input type="text" id="skymail_api_base" placeholder="https://api.skymail.ink"/>
+          </label>
+          <label>令牌
+            <input type="password" id="skymail_token"/>
+          </label>
+          <label>域名
+            <input type="text" id="skymail_domain"/>
+          </label>
+        </div>
       </div>
-      <div class="row" style="margin-top:8px">
-        <label>域名
-          <input type="text" id="cloudmail_domain"/>
-        </label>
-      </div>
-    </div>
 
-    <div id="box_freemail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="freemail_api_url"/>
-        </label>
-        <label>Admin Token
-          <input type="password" id="freemail_admin_token"/>
-        </label>
-        <label>域名
-          <input type="text" id="freemail_domain"/>
-        </label>
+      <div id="box_cloudmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API 地址
+            <input type="text" id="cloudmail_api_base"/>
+          </label>
+          <label>管理员邮箱
+            <input type="text" id="cloudmail_admin_email"/>
+          </label>
+          <label>管理员密码
+            <input type="password" id="cloudmail_admin_password"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>域名
+            <input type="text" id="cloudmail_domain"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div id="box_opentrashmail" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API URL
-          <input type="text" id="opentrashmail_api_url"/>
-        </label>
-        <label>域名
-          <input type="text" id="opentrashmail_domain"/>
-        </label>
-        <label>密码
-          <input type="password" id="opentrashmail_password"/>
-        </label>
+      <div id="box_freemail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="freemail_api_url"/>
+          </label>
+          <label>管理员令牌
+            <input type="password" id="freemail_admin_token"/>
+          </label>
+          <label>域名
+            <input type="text" id="freemail_domain"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div id="box_laoudo" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label>Auth
-          <input type="password" id="laoudo_auth"/>
-        </label>
-        <label>邮箱
-          <input type="text" id="laoudo_email"/>
-        </label>
-        <label>Account ID
-          <input type="text" id="laoudo_account_id"/>
-        </label>
+      <div id="box_opentrashmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="opentrashmail_api_url"/>
+          </label>
+          <label>域名
+            <input type="text" id="opentrashmail_domain"/>
+          </label>
+          <label>密码
+            <input type="password" id="opentrashmail_password"/>
+          </label>
+        </div>
       </div>
-    </div>
 
-    <div class="muted" style="margin-top:10px;font-size:12px;display:none" id="email_hint"></div>
+      <div id="box_laoudo" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label>Auth
+            <input type="password" id="laoudo_auth"/>
+          </label>
+          <label>邮箱
+            <input type="text" id="laoudo_email"/>
+          </label>
+          <label>账号 ID
+            <input type="text" id="laoudo_account_id"/>
+          </label>
+        </div>
+      </div>
+
+      <div class="muted" style="margin-top:10px;display:none" id="email_hint"></div>
+    </div>
   </div>
 
   <div class="card">
@@ -2055,21 +2095,20 @@ INDEX_HTML = r"""
   </div>
 
   <div class="card" style="padding:0;overflow:hidden">
-    <div style="padding:14px 14px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
-      <h2 style="margin:0">账号文件</h2>
-      <div class="actions" style="margin:0">
+    <div style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--line)">
+      <h2 style="margin:0;border:0;padding:0">账号文件</h2>
+      <div style="margin-left:auto;display:flex;gap:8px">
         <button class="btn" type="button" onclick="toggleSelectAllFiles(true)">全选</button>
         <button class="btn" type="button" onclick="toggleSelectAllFiles(false)">取消全选</button>
         <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
       </div>
     </div>
-    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选不需要的文件后可批量删除。</div>
     {% if files %}
     <table>
       <thead>
         <tr>
           <th style="width:44px"><input type="checkbox" id="chk_all_files" onclick="toggleSelectAllFiles(this.checked)" title="全选"/></th>
-          <th>文件</th><th>数量</th><th>时间</th><th>操作</th>
+          <th>文件名</th><th>数量</th><th>修改时间</th><th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -2088,9 +2127,10 @@ INDEX_HTML = r"""
       </tbody>
     </table>
     {% else %}
-    <div style="padding:24px;color:var(--muted);text-align:center">暂无 accounts_*.txt</div>
+    <div style="padding:24px;color:var(--steel);text-align:center">暂无 accounts_*.txt</div>
     {% endif %}
   </div>
+
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -2372,6 +2412,7 @@ poll();
 setInterval(poll, 2000);
 </script>
 </body></html>
+
 """
 
 PREVIEW_HTML = """
