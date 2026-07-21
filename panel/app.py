@@ -928,9 +928,8 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
     """Email settings for panel UI (multi-provider dropdown)."""
     c = cfg if isinstance(cfg, dict) else load_config()
     provider = str(c.get("email_provider") or "cfworker").strip().lower()
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom"):
-        provider = "cfworker" if provider != "custom" else "cfworker"
-    if provider == "custom":
+    # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
         provider = "cfworker"
     # alias yyds -> maliapi for UI
     if provider == "yyds":
@@ -938,11 +937,9 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
 
     choices = [
         {"id": "cfworker", "label": "CF Worker", "group": "自建"},
-        {"id": "cloudflare", "label": "Cloudflare Temp Email", "group": "自建"},
         {"id": "moemail", "label": "MoeMail", "group": "自建"},
         {"id": "freemail", "label": "Freemail", "group": "自建"},
         {"id": "opentrashmail", "label": "OpenTrashMail", "group": "自建"},
-        {"id": "tempmail_lol", "label": "TempMail.lol", "group": "公共"},
         {"id": "duckmail", "label": "DuckMail", "group": "公共"},
         {"id": "gptmail", "label": "GPTMail", "group": "公共"},
         {"id": "maliapi", "label": "MaliAPI", "group": "付费"},
@@ -959,24 +956,12 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         "provider": provider,
         "choices": choices,
         "email_failover": bool(c.get("email_failover", True)),
-        # generic / cfworker / cloudflare
+        # cfworker (cloudflare_temp_email protocol; cloudflare_*/defaultDomains kept as legacy aliases)
         "cfworker_api_url": str(c.get("cfworker_api_url") or c.get("cloudflare_api_base") or "").strip(),
         "cfworker_admin_token": str(c.get("cfworker_admin_token") or c.get("cloudflare_api_key") or "").strip(),
         "cfworker_domain": str(c.get("cfworker_domain") or c.get("defaultDomains") or "").strip(),
         "cfworker_custom_auth": str(c.get("cfworker_custom_auth") or "").strip(),
         "cfworker_subdomain": str(c.get("cfworker_subdomain") or "").strip(),
-        "custom_api_base": str(c.get("cloudflare_api_base") or c.get("cfworker_api_url") or "").strip(),
-        "custom_api_key": str(c.get("cloudflare_api_key") or c.get("cfworker_admin_token") or "").strip(),
-        "custom_auth_mode": (
-            "bearer"
-            if str(c.get("cloudflare_auth_mode") or "").strip().lower()
-            in ("auth", "bearer", "authorization")
-            else str(c.get("cloudflare_auth_mode") or "x-admin-auth").strip()
-        ),
-        "custom_domain": str(c.get("defaultDomains") or c.get("cfworker_domain") or "").strip(),
-        "custom_path_accounts": str(c.get("cloudflare_path_accounts") or "/admin/new_address").strip(),
-        "custom_path_messages": str(c.get("cloudflare_path_messages") or "/api/mails").strip(),
-        "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
         # providers
         "moemail_api_url": str(c.get("moemail_api_url") or "https://sall.cc").strip(),
         "moemail_api_key": str(c.get("moemail_api_key") or "").strip(),
@@ -1018,15 +1003,14 @@ def apply_email_config_from_ui(data: dict) -> dict:
     """Merge panel email form into config.json and return public view."""
     cfg = load_config()
     provider = str(data.get("provider") or "cfworker").strip().lower()
-    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
-        raise ValueError("内置公共 Tempmailer 已移除，请选择其它邮箱源")
-    if provider == "custom":
+    # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
         provider = "cfworker"
     if provider == "yyds":
         provider = "maliapi"
 
     valid = {
-        "cfworker", "cloudflare", "moemail", "tempmail_lol", "duckmail", "gptmail",
+        "cfworker", "moemail", "duckmail", "gptmail",
         "maliapi", "luckmail", "skymail", "cloudmail", "freemail", "opentrashmail", "laoudo",
     }
     if provider not in valid:
@@ -1039,24 +1023,15 @@ def apply_email_config_from_ui(data: dict) -> dict:
     def g(key, default=""):
         return str(data.get(key, cfg.get(key, default)) or default).strip()
 
-    # always store fields (so switching providers keeps values)
-    cfg["cfworker_api_url"] = g("cfworker_api_url") or g("custom_api_base")
-    cfg["cfworker_admin_token"] = g("cfworker_admin_token") or g("custom_api_key")
-    cfg["cfworker_domain"] = g("cfworker_domain") or g("custom_domain")
+    # cfworker fields (also sync to cloudflare_*/defaultDomains legacy keys for back-compat)
+    cfg["cfworker_api_url"] = g("cfworker_api_url")
+    cfg["cfworker_admin_token"] = g("cfworker_admin_token")
+    cfg["cfworker_domain"] = g("cfworker_domain")
     cfg["cfworker_custom_auth"] = g("cfworker_custom_auth")
     cfg["cfworker_subdomain"] = g("cfworker_subdomain")
-
-    # cloudflare_temp_email legacy keys
-    cfg["cloudflare_api_base"] = g("custom_api_base") or g("cfworker_api_url")
-    cfg["cloudflare_api_key"] = g("custom_api_key") or g("cfworker_admin_token")
-    mode = g("custom_auth_mode", "x-admin-auth").lower() or "x-admin-auth"
-    if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
-        mode = "x-admin-auth"
-    cfg["cloudflare_auth_mode"] = "auth" if mode == "bearer" else mode
-    cfg["defaultDomains"] = g("custom_domain") or g("cfworker_domain")
-    cfg["cloudflare_path_accounts"] = g("custom_path_accounts", "/admin/new_address") or "/admin/new_address"
-    cfg["cloudflare_path_messages"] = g("custom_path_messages", "/api/mails") or "/api/mails"
-    cfg["cloudflare_path_token"] = g("custom_path_token", "/api/token") or "/api/token"
+    cfg["cloudflare_api_base"] = cfg["cfworker_api_url"]
+    cfg["cloudflare_api_key"] = cfg["cfworker_admin_token"]
+    cfg["defaultDomains"] = cfg["cfworker_domain"]
 
     for key in (
         "moemail_api_url", "moemail_api_key",
@@ -1080,7 +1055,6 @@ def apply_email_config_from_ui(data: dict) -> dict:
     # required fields soft-check for selected provider
     need = {
         "cfworker": ["cfworker_api_url"],
-        "cloudflare": ["cloudflare_api_base"],
         "luckmail": ["luckmail_api_key"],
         "skymail": ["skymail_token"],
         "cloudmail": ["cloudmail_api_base"],
@@ -1091,11 +1065,6 @@ def apply_email_config_from_ui(data: dict) -> dict:
     }
     for field in need.get(provider, []):
         if not str(cfg.get(field) or "").strip():
-            # allow cloudflare/cfworker alias
-            if provider == "cfworker" and cfg.get("cloudflare_api_base"):
-                continue
-            if provider == "cloudflare" and cfg.get("cfworker_api_url"):
-                continue
             raise ValueError(f"邮箱源 {provider} 需要配置: {field}")
 
     cfg.pop("tempmailer_api_base", None)
@@ -1431,15 +1400,17 @@ def _run_one_round(round_no: int, total: int) -> bool:
         f"round_timeout={round_timeout}s"
     )
 
-    # 注册前检查邮箱源是否可用（公共 Tempmailer 已移除）
+    # 注册前检查邮箱源是否可用
     try:
         mail_cfg = load_config()
         mail_prov = str(mail_cfg.get("email_provider") or "cfworker").strip().lower()
-        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten"):
-            log_line("[!] 内置公共临时邮已移除，请在面板下拉选择其它邮箱源")
-            return False
+        # cloudflare/custom/tempmailer are all aliases of cfworker
+        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare"):
+            mail_prov = "cfworker"
+        if mail_prov == "yyds":
+            mail_prov = "maliapi"
         # no-key providers
-        free_ok = mail_prov in ("tempmail_lol", "moemail", "gptmail", "duckmail")
+        free_ok = mail_prov in ("moemail", "gptmail", "duckmail")
         has_cf = bool(str(mail_cfg.get("cfworker_api_url") or mail_cfg.get("cloudflare_api_base") or "").strip())
         has_luck = bool(str(mail_cfg.get("luckmail_api_key") or "").strip())
         has_mali = bool(str(mail_cfg.get("maliapi_api_key") or mail_cfg.get("yyds_api_key") or "").strip())
@@ -1449,11 +1420,11 @@ def _run_one_round(round_no: int, total: int) -> bool:
         has_otm = bool(str(mail_cfg.get("opentrashmail_api_url") or "").strip())
         has_lao = bool(str(mail_cfg.get("laoudo_email") or "").strip())
         ok = free_ok
-        if mail_prov in ("cfworker", "cloudflare", "custom"):
+        if mail_prov == "cfworker":
             ok = has_cf
         elif mail_prov == "luckmail":
             ok = has_luck
-        elif mail_prov in ("maliapi", "yyds"):
+        elif mail_prov == "maliapi":
             ok = has_mali
         elif mail_prov == "skymail":
             ok = has_sky
@@ -1962,42 +1933,6 @@ INDEX_HTML = r"""
       </div>
     </div>
 
-    <div id="box_cloudflare" class="mail-box" style="display:none;margin-top:10px">
-      <div class="row">
-        <label style="flex:2">API 根地址
-          <input type="text" id="custom_api_base" placeholder="https://mail.example.com"/>
-        </label>
-        <label>API Key
-          <input type="password" id="custom_api_key" placeholder="x-admin-auth"/>
-        </label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label>鉴权方式
-          <select id="custom_auth_mode">
-            <option value="x-admin-auth">x-admin-auth</option>
-            <option value="bearer">Bearer</option>
-            <option value="x-api-key">X-API-Key</option>
-            <option value="query-key">?key=</option>
-            <option value="none">无</option>
-          </select>
-        </label>
-        <label>域名
-          <input type="text" id="custom_domain" placeholder="mail.example.com"/>
-        </label>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label>创建路径
-          <input type="text" id="custom_path_accounts" placeholder="/admin/new_address"/>
-        </label>
-        <label>收信路径
-          <input type="text" id="custom_path_messages" placeholder="/api/mails"/>
-        </label>
-        <label>Token 路径
-          <input type="text" id="custom_path_token" placeholder="/api/token"/>
-        </label>
-      </div>
-    </div>
-
     <div id="box_moemail" class="mail-box" style="display:none;margin-top:10px">
       <div class="row">
         <label style="flex:2">API URL
@@ -2008,8 +1943,6 @@ INDEX_HTML = r"""
         </label>
       </div>
     </div>
-
-    <div id="box_tempmail_lol" class="mail-box" style="display:none;margin-top:10px"></div>
 
     <div id="box_duckmail" class="mail-box" style="display:none;margin-top:10px">
       <div class="row">
@@ -2215,15 +2148,6 @@ function onEmailProviderChange(){
   document.querySelectorAll('.mail-box').forEach(el=>{ el.style.display='none'; });
   const box=document.getElementById('box_'+p);
   if(box) box.style.display='block';
-  // cloudflare alias box
-  if(p==='cloudflare'){
-    const b=document.getElementById('box_cloudflare');
-    if(b) b.style.display='block';
-  }
-  if(p==='cfworker'){
-    const b=document.getElementById('box_cfworker');
-    if(b) b.style.display='block';
-  }
 }
 function _val(id){const el=document.getElementById(id); return el?el.value:'';}
 function _set(id,v){const el=document.getElementById(id); if(el) el.value=v||'';}
@@ -2264,13 +2188,6 @@ async function loadEmailConfig(){
     _set('cfworker_domain', e.cfworker_domain);
     _set('cfworker_custom_auth', e.cfworker_custom_auth);
     _set('cfworker_subdomain', e.cfworker_subdomain);
-    _set('custom_api_base', e.custom_api_base);
-    _set('custom_api_key', e.custom_api_key);
-    _set('custom_auth_mode', e.custom_auth_mode||'x-admin-auth');
-    _set('custom_domain', e.custom_domain);
-    _set('custom_path_accounts', e.custom_path_accounts||'/admin/new_address');
-    _set('custom_path_messages', e.custom_path_messages||'/api/mails');
-    _set('custom_path_token', e.custom_path_token||'/api/token');
     _set('moemail_api_url', e.moemail_api_url||'https://sall.cc');
     _set('moemail_api_key', e.moemail_api_key);
     _set('gptmail_base_url', e.gptmail_base_url||'https://mail.chatgpt.org.uk');
@@ -2319,13 +2236,6 @@ async function saveEmailConfig(){
     cfworker_domain: _val('cfworker_domain'),
     cfworker_custom_auth: _val('cfworker_custom_auth'),
     cfworker_subdomain: _val('cfworker_subdomain'),
-    custom_api_base: _val('custom_api_base'),
-    custom_api_key: _val('custom_api_key'),
-    custom_auth_mode: _val('custom_auth_mode')||'x-admin-auth',
-    custom_domain: _val('custom_domain'),
-    custom_path_accounts: _val('custom_path_accounts'),
-    custom_path_messages: _val('custom_path_messages'),
-    custom_path_token: _val('custom_path_token'),
     moemail_api_url: _val('moemail_api_url'),
     moemail_api_key: _val('moemail_api_key'),
     gptmail_base_url: _val('gptmail_base_url'),
