@@ -2528,7 +2528,7 @@ class CFWorkerMailbox(BaseMailbox):
             "GET",
             "/admin/mails",
             params={"limit": 20, "offset": 0, "address": email},
-            timeout=10,
+            timeout=5,
         )
         return data.get("results", data) if isinstance(data, dict) else data
 
@@ -2613,7 +2613,7 @@ class CFWorkerMailbox(BaseMailbox):
 
         return self._run_polling_wait(
             timeout=timeout,
-            poll_interval=3,
+            poll_interval=1.5,
             poll_once=poll_once,
             timeout_message=f"\u7b49\u5f85\u9a8c\u8bc1\u7801\u8d85\u65f6 ({timeout}s)",
         )

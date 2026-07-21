@@ -1655,6 +1655,9 @@ def get_oai_code(
                 proxy=get_configured_proxy(),
             )
         except Exception as exc:
+            # 验证码等待超时直接抛出，不再回退旧通道（邮件没到，旧通道也收不到，只会双倍等待）
+            if isinstance(exc, TimeoutError) or "超时" in str(exc) or "timeout" in str(exc).lower():
+                raise
             if provider not in ("cloudflare", "cfworker", "custom"):
                 raise
             if log_callback:
