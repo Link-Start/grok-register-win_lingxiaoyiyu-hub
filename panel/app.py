@@ -1834,7 +1834,7 @@ INDEX_HTML = r"""
     input:focus,select:focus{border-color:var(--ink)}
     select{background-image:linear-gradient(45deg,transparent 50%,var(--ink) 50%),linear-gradient(135deg,var(--ink) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
     input[type=number]{font-weight:500}
-    input[type=checkbox]{width:16px;height:16px;min-width:0;accent-color:var(--rust)}
+    input[type=checkbox]{width:16px;height:16px;min-width:0;appearance:auto;accent-color:var(--rust);cursor:pointer}
     input[type=file]{min-width:200px}
 
     .mail-box{display:none;margin-top:14px;border:1px solid var(--line);padding:14px;background:var(--paper)}
