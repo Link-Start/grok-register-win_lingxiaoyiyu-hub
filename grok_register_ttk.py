@@ -42,6 +42,41 @@ from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 from curl_cffi import requests
 
+# any-auto-register 风格收码：before_ids / otp_sent_at / 统一提码
+_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+try:
+    import mail_providers as mail_providers  # type: ignore
+except Exception:
+    mail_providers = None  # type: ignore
+
+try:
+    from mailbox_core import (  # type: ignore
+        GROK_CODE_PATTERN,
+        extract_code as mailbox_extract_code,
+        message_id as mailbox_message_id,
+        message_text_blob as mailbox_message_text_blob,
+        should_skip_message as mailbox_should_skip_message,
+        wait_code_from_messages,
+        GPTMailClient,
+        TempMailLolClient,
+        MailboxAccount,
+    )
+
+    _MAILBOX_CORE_OK = True
+except Exception:
+    _MAILBOX_CORE_OK = False
+    GROK_CODE_PATTERN = r"[A-Z0-9]{3}-[A-Z0-9]{3}"
+    mailbox_extract_code = None
+    mailbox_message_id = None
+    mailbox_message_text_blob = None
+    mailbox_should_skip_message = None
+    wait_code_from_messages = None
+    GPTMailClient = None
+    TempMailLolClient = None
+    MailboxAccount = None
+
 
 def is_page_disconnected_error(exc):
     """Chromium PageDisconnectedError or Camoufox/Playwright closed target."""
@@ -88,14 +123,47 @@ DEFAULT_CONFIG = {
     "cloudflare_path_accounts": "/api/new_address",
     "cloudflare_path_token": "/api/token",
     "cloudflare_path_messages": "/api/mails",
-    "tempmailer_api_base": "https://tempmailer.cc/api",
-    "tempmailer_domain": "",
-    "tempmailer_domains": [],
-    "email_provider": "tempmailer",
+    # 默认使用自建临时邮（cloudflare_temp_email 兼容）。内置 Tempmailer 已移除。
+    "email_provider": "cfworker",
     # 邮箱故障自动切换：按 email_providers 顺序轮换（只使用已配置可用的源）
-    # 注意：inboxkitten.com 已被 xAI 拒绝，不再作为内置/默认源
+    # 注意：公共 Tempmailer / inboxkitten 已因滥用被拒收 xAI 邮件，不再内置
     "email_failover": True,
-    "email_providers": ["tempmailer", "duckmail", "yyds", "cloudflare"],
+    "email_providers": [
+        "cfworker","moemail",
+        "maliapi","luckmail","skymail","cloudmail","freemail","opentrashmail","laoudo","yyds",
+    ],
+    "moemail_api_url": "https://sall.cc",
+    "moemail_api_key": "",
+    "maliapi_base_url": "https://maliapi.215.im/v1",
+    "maliapi_api_key": "",
+    "maliapi_domain": "",
+    "luckmail_base_url": "https://mails.luckyous.com/",
+    "luckmail_api_key": "",
+    "luckmail_project_code": "grok",
+    "luckmail_email_type": "",
+    "luckmail_domain": "",
+    "skymail_api_base": "https://api.skymail.ink",
+    "skymail_token": "",
+    "skymail_domain": "",
+    "cloudmail_api_base": "",
+    "cloudmail_admin_email": "",
+    "cloudmail_admin_password": "",
+    "cloudmail_domain": "",
+    "freemail_api_url": "",
+    "freemail_admin_token": "",
+    "freemail_domain": "",
+    "opentrashmail_api_url": "",
+    "opentrashmail_domain": "",
+    "opentrashmail_password": "",
+    "cfworker_api_url": "",
+    "cfworker_admin_token": "",
+    "cfworker_domain": "",
+    "cfworker_custom_auth": "",
+    "cfworker_subdomain": "",
+    "laoudo_auth": "",
+    "laoudo_email": "",
+    "laoudo_account_id": "",
+
     "proxy": "http://127.0.0.1:7890",
     # 代理失败时是否回退直连（本地版默认关闭，避免直连拿不到 grok SSO）
     "allow_proxy_fallback": False,
@@ -117,7 +185,6 @@ DEFAULT_CONFIG = {
 config = DEFAULT_CONFIG.copy()
 _cf_domain_index = 0
 _email_provider_index = 0
-_tempmailer_domain_index = 0
 
 
 class RegistrationCancelled(Exception):
@@ -1344,280 +1411,34 @@ def pick_domain(api_key=None):
 
 
 
-# ===== tempmailer.cc provider (unofficial internal API) =====
-TEMPMAILER_API_BASE_DEFAULT = "https://tempmailer.cc/api"
-
-
-def get_tempmailer_api_base():
-    return str(config.get("tempmailer_api_base") or TEMPMAILER_API_BASE_DEFAULT).rstrip("/")
-
-
-def tempmailer_new_session_id():
-    return str(uuid.uuid4())
-
-
-def tempmailer_headers(session_id, content_type=True):
-    headers = {
-        "User-Agent": get_user_agent(),
-        "Accept": "application/json",
-        "Origin": "https://tempmailer.cc",
-        "Referer": "https://tempmailer.cc/zh/",
-        "x-tempmailer-session": session_id or tempmailer_new_session_id(),
-    }
-    if content_type:
-        headers["Content-Type"] = "application/json"
-    return headers
-
-
-def tempmailer_prewarm(session_id):
-    base = get_tempmailer_api_base()
-    try:
-        http_get(f"{base}/prewarm", headers=tempmailer_headers(session_id, content_type=False), timeout=15)
-    except Exception:
-        pass
-
-
-def get_tempmailer_domains():
-    domains = []
-    raw_list = config.get("tempmailer_domains") or []
-    if isinstance(raw_list, str):
-        raw_list = [x.strip() for x in raw_list.split(",") if x.strip()]
-    for d in raw_list:
-        d = str(d).strip()
-        if d and d not in domains and d != "example.com":
-            domains.append(d)
-    single = str(config.get("tempmailer_domain") or config.get("defaultDomains") or "").strip()
-    for d in single.split(","):
-        d = d.strip()
-        if d and d not in domains and d != "example.com":
-            domains.append(d)
-    return domains
-
-
-def pick_tempmailer_domain(rotate=False):
-    """Pick tempmailer domain; rotate=True advances to next configured domain."""
-    global _tempmailer_domain_index
-    domains = get_tempmailer_domains()
-    if not domains:
-        return ""
-    if rotate:
-        _tempmailer_domain_index = (_tempmailer_domain_index + 1) % len(domains)
-    return domains[_tempmailer_domain_index % len(domains)]
-
-
-def tempmailer_generate_email(session_id=None, domain=None):
-    """Create a temp mailbox. Returns (email, session_id). session is required for inbox."""
-    base = get_tempmailer_api_base()
-    sid = session_id or tempmailer_new_session_id()
-    tempmailer_prewarm(sid)
-    headers = tempmailer_headers(sid, content_type=True)
-    payload = {}
-    use_domain = (domain or pick_tempmailer_domain(rotate=False) or "").strip()
-    if use_domain and use_domain not in ("example.com",):
-        payload["domain"] = use_domain
-    resp = http_post(f"{base}/generate", json=payload, headers=headers, timeout=30)
-    try:
-        data = resp.json()
-    except Exception:
-        raise Exception(f"tempmailer generate 返回非JSON: HTTP {resp.status_code} {resp.text[:300]}")
-    email = (data or {}).get("email")
-    if not email:
-        raise Exception(f"tempmailer generate 失败: HTTP {resp.status_code} {data}")
-    return email, sid
-
-
-def tempmailer_get_email_and_token():
-    domains = get_tempmailer_domains() or [""]
-    errors = []
-    # 多域名时逐个尝试
-    for i, _ in enumerate(domains):
-        domain = pick_tempmailer_domain(rotate=(i > 0))
-        try:
-            email, sid = tempmailer_generate_email(domain=domain or None)
-            print(f"[*] 已创建 tempmailer 邮箱: {email}" + (f" (domain={domain})" if domain else ""))
-            return email, sid
-        except Exception as exc:
-            errors.append(f"{domain or 'auto'}: {exc}")
-            continue
-    raise Exception("tempmailer 创建邮箱失败: " + "; ".join(errors))
-
-
-def tempmailer_inbox_url(email, message_id=None):
-    base = get_tempmailer_api_base()
-    encoded = urllib.parse.quote(email, safe="")
-    if message_id is None:
-        return f"{base}/inbox/{encoded}"
-    return f"{base}/inbox/{encoded}/{urllib.parse.quote(str(message_id), safe='')}"
-
-
-def tempmailer_get_messages(email, session_id):
-    resp = http_get(
-        tempmailer_inbox_url(email),
-        headers=tempmailer_headers(session_id, content_type=False),
-        timeout=20,
-    )
-    try:
-        data = resp.json()
-    except Exception:
-        raise Exception(f"tempmailer inbox 返回非JSON: HTTP {resp.status_code} {resp.text[:300]}")
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("messages", "mails", "items", "data", "inbox"):
-            val = data.get(key)
-            if isinstance(val, list):
-                return val
-        # single message object
-        if data.get("id") or data.get("subject") or data.get("html_body") or data.get("text_body"):
-            return [data]
-    return []
-
-
-def tempmailer_get_message_detail(email, message_id, session_id):
-    resp = http_get(
-        tempmailer_inbox_url(email, message_id),
-        headers=tempmailer_headers(session_id, content_type=False),
-        timeout=20,
-    )
-    try:
-        data = resp.json()
-    except Exception:
-        raise Exception(f"tempmailer mail detail 返回非JSON: HTTP {resp.status_code} {resp.text[:300]}")
-    if isinstance(data, dict):
-        return data
-    return {}
-
-
-def tempmailer_message_text(msg):
-    parts = []
-    if not isinstance(msg, dict):
-        return ""
-    for field in (
-        "subject",
-        "text_body",
-        "html_body",
-        "text",
-        "html",
-        "body",
-        "content",
-        "raw",
-        "intro",
-        "snippet",
-        "preview",
-    ):
-        value = msg.get(field)
-        if isinstance(value, str) and value.strip():
-            if field in ("html_body", "html"):
-                parts.append(re.sub(r"<[^>]+>", " ", value))
-            else:
-                parts.append(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str) and item.strip():
-                    parts.append(re.sub(r"<[^>]+>", " ", item) if field in ("html_body", "html") else item)
-    return "\n".join(parts)
-
-
-def tempmailer_get_oai_code(
-    session_id,
-    email,
-    timeout=180,
-    poll_interval=3,
-    log_callback=None,
-    cancel_callback=None,
-    resend_callback=None,
-):
-    deadline = time.time() + timeout
-    seen_attempts = {}
-    next_resend_at = time.time() + 35
-    while time.time() < deadline:
-        raise_if_cancelled(cancel_callback)
-        if resend_callback and time.time() >= next_resend_at:
-            try:
-                resend_callback()
-                if log_callback:
-                    log_callback("[*] 已触发重新发送验证码")
-            except Exception as exc:
-                if log_callback:
-                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
-            next_resend_at = time.time() + 35
-        try:
-            messages = tempmailer_get_messages(email, session_id)
-        except Exception as exc:
-            if log_callback:
-                log_callback(f"[Debug] tempmailer 拉取邮件列表失败: {exc}")
-            sleep_with_cancel(poll_interval, cancel_callback)
-            continue
-        if log_callback:
-            log_callback(f"[Debug] tempmailer 本轮邮件数量: {len(messages)}")
-        for msg in messages:
-            msg_id = (
-                msg.get("id")
-                or msg.get("msgid")
-                or msg.get("message_id")
-                or msg.get("uid")
-                or msg.get("mail_id")
-            )
-            # fallback key when id missing
-            if not msg_id:
-                msg_id = f"subj:{msg.get('subject','')}|from:{msg.get('from','')}|ts:{msg.get('date') or msg.get('created_at') or msg.get('timestamp') or ''}"
-            attempt = int(seen_attempts.get(msg_id, 0))
-            if attempt >= 8:
-                continue
-            seen_attempts[msg_id] = attempt + 1
-            combined = tempmailer_message_text(msg)
-            subject = str(msg.get("subject", "") or "")
-            # detail endpoint if available and content thin
-            if msg_id and (not combined.strip() or len(combined) < 20):
-                try:
-                    detail = tempmailer_get_message_detail(email, msg_id, session_id)
-                    combined = (combined + "\n" + tempmailer_message_text(detail)).strip()
-                    if not subject:
-                        subject = str(detail.get("subject", "") or "")
-                except Exception as exc:
-                    if log_callback:
-                        log_callback(f"[Debug] tempmailer detail失败，用列表内容: {exc}")
-            if log_callback:
-                log_callback(f"[Debug] tempmailer 收到邮件: {subject or '(no subject)'}")
-            code = extract_verification_code(combined, subject)
-            if code:
-                if log_callback:
-                    log_callback(f"[*] tempmailer 从邮件中提取到验证码: {code}")
-                return code
-            elif log_callback:
-                log_callback(f"[Debug] 邮件已解析但未提取到验证码 id={msg_id} attempt={seen_attempts[msg_id]}")
-        sleep_with_cancel(poll_interval, cancel_callback)
-    raise Exception(f"tempmailer 在 {timeout}s 内未收到验证码邮件")
-
-
-# ===== end tempmailer =====
-
+# ===== tempmailer 已移除 =====
+# 因公共 Tempmailer 域名遭滥用，服务商已暂时拒收 xAI 验证码邮件。
+# 请使用自建临时邮 API（面板「自定义」/ cloudflare_temp_email 兼容接口）。
 
 def get_email_provider():
-    p = str(config.get("email_provider") or "tempmailer").strip().lower()
-    # inboxkitten.com 域名已被 xAI 拒绝，强制改用 tempmailer
-    if p in ("inboxkitten", "inbox_kitten"):
-        return "tempmailer"
-    return p or "tempmailer"
+    if mail_providers is not None:
+        return mail_providers.normalize_provider(config.get("email_provider") or "cfworker")
+    p = str(config.get("email_provider") or "cfworker").strip().lower()
+    if p in ("tempmailer", "inboxkitten", "inbox_kitten", "custom"):
+        return "cfworker"
+    return p or "cfworker"
 
 
 def email_provider_ready(provider: str) -> bool:
     """判断邮箱源是否已配置到可尝试状态。"""
-    p = (provider or "").strip().lower()
-    # 已从内置移除：xAI 拒绝 inboxkitten.com 域名
-    if p in ("inboxkitten", "inbox_kitten"):
+    if mail_providers is not None:
+        return mail_providers.provider_ready(config, provider)
+    p = str(provider or "").strip().lower()
+    if p in ("tempmailer", "inboxkitten", "inbox_kitten"):
         return False
-    if p == "tempmailer":
-        return bool(get_tempmailer_api_base())
-    if p == "duckmail":
-        return bool(str(config.get("duckmail_api_key") or "").strip())
-    if p == "yyds":
-        return bool(
-            str(config.get("yyds_api_key") or "").strip()
-            or str(config.get("yyds_jwt") or "").strip()
-        )
-    if p == "cloudflare":
-        return bool(str(config.get("cloudflare_api_base") or "").strip())
+    if p == "moemail":
+        return True
+    if p in ("cfworker", "cloudflare", "custom"):
+        return bool(str(config.get("cfworker_api_url") or config.get("cloudflare_api_base") or "").strip())
+    if p == "luckmail":
+        return bool(str(config.get("luckmail_api_key") or "").strip())
+    if p in ("maliapi", "yyds"):
+        return bool(str(config.get("maliapi_api_key") or config.get("yyds_api_key") or config.get("yyds_jwt") or "").strip())
     return False
 
 
@@ -1631,12 +1452,12 @@ def get_email_provider_chain():
     else:
         chain = []
     # 过滤已废弃的 inboxkitten
-    chain = [p for p in chain if p not in ("inboxkitten", "inbox_kitten")]
+    chain = [p for p in chain if p not in ("inboxkitten", "inbox_kitten", "tempmailer")]
     primary = get_email_provider()
     if primary and primary not in chain:
         chain.insert(0, primary)
     if not chain:
-        chain = [primary or "tempmailer"]
+        chain = [primary or "cloudflare"]
     # 去重保持顺序
     seen = set()
     ordered = []
@@ -1646,7 +1467,7 @@ def get_email_provider_chain():
             ordered.append(p)
     ready = [p for p in ordered if email_provider_ready(p)]
     # 若一个都没 ready，仍返回 primary 以免完全不可用
-    return ready or ([primary] if primary else ["tempmailer"])
+    return ready or ([primary] if primary else ["cloudflare"])
 
 
 def rotate_email_provider(log_callback=None, reason=""):
@@ -1656,15 +1477,6 @@ def rotate_email_provider(log_callback=None, reason=""):
     if not chain:
         return get_email_provider()
     if len(chain) == 1:
-        # 仅一个源：若是 tempmailer 则轮换域名
-        if chain[0] == "tempmailer" and len(get_tempmailer_domains()) > 1:
-            domain = pick_tempmailer_domain(rotate=True)
-            if log_callback:
-                log_callback(
-                    f"[*] 邮箱源仅 tempmailer，切换域名: {domain}"
-                    + (f" ({reason})" if reason else "")
-                )
-            return chain[0]
         if log_callback:
             log_callback(
                 f"[!] 无其它可用邮箱源可切换，继续使用 {chain[0]}"
@@ -1708,27 +1520,47 @@ def is_mail_related_error(exc) -> bool:
     return any(k.lower() in msg for k in keys)
 
 
-def _get_email_and_token_once(provider, api_key=None):
+def _get_email_and_token_once(provider, api_key=None, log_callback=None):
     provider = (provider or "").strip().lower()
-    if provider in ("inboxkitten", "inbox_kitten"):
+    if mail_providers is not None:
+        provider = mail_providers.normalize_provider(provider)
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten"):
         raise Exception(
-            "InboxKitten 已移除：xAI 拒绝域名 inboxkitten.com，请改用 tempmailer 或自定义邮箱"
+            "内置公共临时邮已移除：因滥用，Tempmailer 等已拒收 xAI 验证码邮件。"
+            "请在面板下拉选择其它邮箱源（CF Worker / MoeMail / LuckMail 等）。"
         )
-    if provider == "tempmailer":
-        return tempmailer_get_email_and_token()
-    if provider == "yyds":
+    if mail_providers is not None and mail_providers.import_ok():
+        try:
+            return mail_providers.get_email_and_token(
+                config,
+                provider,
+                proxy=get_configured_proxy(),
+                log_callback=log_callback,
+            )
+        except Exception as exc:
+            if provider not in ("cloudflare", "cfworker", "custom", "yyds", "maliapi"):
+                raise
+            if log_callback:
+                log_callback(f"[!] 适配器申请邮箱失败，尝试旧通道: {exc}")
+    if provider in ("yyds", "maliapi"):
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
-    if provider == "cloudflare":
-        api_base = get_cloudflare_api_base()
+    if provider in ("cloudflare", "cfworker", "custom"):
+        api_base = get_cloudflare_api_base() or str(config.get("cfworker_api_url") or "").strip()
         if not api_base:
-            raise Exception("Cloudflare API Base 未配置")
+            raise Exception("自建邮箱 API 未配置（cfworker_api_url / cloudflare_api_base）")
+        if not str(config.get("cloudflare_api_base") or "").strip():
+            config["cloudflare_api_base"] = api_base
+        if not get_cloudflare_api_key():
+            config["cloudflare_api_key"] = str(
+                config.get("cfworker_admin_token") or config.get("cloudflare_api_key") or ""
+            ).strip()
         try:
             return cloudflare_create_temp_address(api_base)
         except Exception as primary_exc:
             key = api_key or get_cloudflare_api_key()
             domains = cloudflare_get_domains(api_base, api_key=key)
             if not domains:
-                raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
+                raise Exception(f"Cloudflare/自建 创建邮箱失败: {primary_exc}")
             verified = [d for d in domains if d.get("isVerified")]
             target = verified[0] if verified else domains[0]
             domain = target.get("domain")
@@ -1737,17 +1569,14 @@ def _get_email_and_token_once(provider, api_key=None):
             username = generate_username(10)
             address = f"{username}@{domain}"
             password = secrets.token_urlsafe(12)
-            cloudflare_create_account(
-                api_base, address, password, api_key=key, expires_in=0
-            )
+            cloudflare_create_account(api_base, address, password, api_key=key, expires_in=0)
             token = cloudflare_get_token(api_base, address, password, api_key=key)
             if not token:
                 raise Exception("获取 Cloudflare 邮箱 token 失败")
             return address, token
-    # duckmail default
     key = api_key or get_duckmail_api_key()
     if not key:
-        raise Exception("DuckMail API Key 未配置")
+        raise Exception(f"邮箱源 {provider} 未配置或不可用")
     domain = pick_domain(api_key=key)
     username = generate_username(10)
     address = f"{username}@{domain}"
@@ -1757,6 +1586,7 @@ def _get_email_and_token_once(provider, api_key=None):
     if not token:
         raise Exception("获取 DuckMail token 失败")
     return address, token
+
 
 
 def get_email_and_token(api_key=None, log_callback=None):
@@ -1774,7 +1604,7 @@ def get_email_and_token(api_key=None, log_callback=None):
         provider = chain[(_email_provider_index + i) % len(chain)]
         config["email_provider"] = provider
         try:
-            email, token = _get_email_and_token_once(provider, api_key=api_key)
+            email, token = _get_email_and_token_once(provider, api_key=api_key, log_callback=log_callback)
             if log_callback:
                 log_callback(f"[*] 邮箱源 {provider} 创建成功: {email}")
             # 记住当前成功源
@@ -1799,20 +1629,39 @@ def get_oai_code(
     log_callback=None,
     cancel_callback=None,
     resend_callback=None,
+    before_ids=None,
+    otp_sent_at=None,
 ):
+    """拉取验证码。
+
+    before_ids / otp_sent_at 对齐 any-auto-register：
+    - before_ids: 发码前已有邮件 id，避免读到旧码
+    - otp_sent_at: 发码时间戳，跳过更早的邮件
+    """
     provider = get_email_provider()
-    if provider in ("inboxkitten", "inbox_kitten"):
-        provider = "tempmailer"
-    if provider == "tempmailer":
-        return tempmailer_get_oai_code(
-            dev_token,
-            email,
-            timeout=timeout,
-            poll_interval=poll_interval,
-            log_callback=log_callback,
-            cancel_callback=cancel_callback,
-            resend_callback=resend_callback,
-        )
+    # any-auto-register BaseMailbox.wait_for_code for dropdown providers
+    if mail_providers is not None and mail_providers.import_ok() and provider not in ("yyds",):
+        try:
+            return mail_providers.wait_for_code(
+                email,
+                dev_token,
+                timeout=int(timeout or 180),
+                cancel_callback=cancel_callback,
+                before_ids=before_ids,
+                otp_sent_at=otp_sent_at,
+                log_callback=log_callback,
+                config=config,
+                provider=provider,
+                proxy=get_configured_proxy(),
+            )
+        except Exception as exc:
+            # 验证码等待超时直接抛出，不再回退旧通道（邮件没到，旧通道也收不到，只会双倍等待）
+            if isinstance(exc, TimeoutError) or "超时" in str(exc) or "timeout" in str(exc).lower():
+                raise
+            if provider not in ("cloudflare", "cfworker", "custom"):
+                raise
+            if log_callback:
+                log_callback(f"[!] 适配器收码失败，尝试旧通道: {exc}")
     if provider == "yyds":
         return yyds_get_oai_code(
             dev_token,
@@ -1832,6 +1681,20 @@ def get_oai_code(
             log_callback=log_callback,
             cancel_callback=cancel_callback,
             resend_callback=resend_callback,
+            before_ids=before_ids,
+            otp_sent_at=otp_sent_at,
+        )
+    if provider in ("gptmail", "tempmail_lol") and _MAILBOX_CORE_OK:
+        return optional_public_get_oai_code(
+            provider,
+            dev_token,
+            email,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            log_callback=log_callback,
+            cancel_callback=cancel_callback,
+            before_ids=before_ids,
+            otp_sent_at=otp_sent_at,
         )
     return duckmail_get_oai_code(
         dev_token,
@@ -1844,14 +1707,26 @@ def get_oai_code(
 
 
 def extract_verification_code(text, subject=""):
-    """从邮件主题/正文提取 xAI/Grok 验证码（对齐 grok-reg-tool 策略）。"""
+    """从邮件主题/正文提取 xAI/Grok 验证码。
+
+    优先使用 mailbox_core（any-auto-register 风格：去 URL、语义优先、Grok ABC-DEF）。
+    """
+    if mailbox_extract_code is not None:
+        code = mailbox_extract_code(
+            text or "",
+            subject or "",
+            code_pattern=GROK_CODE_PATTERN,
+            prefer_grok=True,
+        )
+        if code:
+            return code
+
     content = text or ""
     if subject:
         content = f"Subject: {subject}\n{content}"
     if not content:
         return None
 
-    # Subject 行优先：6F2-CT8 xAI confirmation code
     match = re.search(
         r"(?:Subject:\s*)?([A-Z0-9]{3}-[A-Z0-9]{3})\s+xAI",
         content,
@@ -1860,7 +1735,6 @@ def extract_verification_code(text, subject=""):
     if match:
         return match.group(1).upper()
 
-    # 独立 XXX-XXX（避免被邮箱/长串误伤）
     match = re.search(
         r"(?<![A-Z0-9-])([A-Z0-9]{3}-[A-Z0-9]{3})(?![A-Z0-9-])",
         content,
@@ -1869,7 +1743,6 @@ def extract_verification_code(text, subject=""):
     if match:
         return match.group(1).upper()
 
-    # 文案旁带标签
     match = re.search(
         r"(?:verification\s+code|验证码|your\s+code|confirmation\s+code)[:\s]*[<>\s]*([A-Z0-9]{3}-[A-Z0-9]{3})\b",
         content,
@@ -1878,7 +1751,6 @@ def extract_verification_code(text, subject=""):
     if match:
         return match.group(1).upper()
 
-    # HTML 灰底块常见样式
     match = re.search(
         r"background-color:\s*#F3F3F3[^>]*>[\s\S]*?([A-Z0-9]{3}-[A-Z0-9]{3})[\s\S]*?</p>",
         content,
@@ -1897,7 +1769,6 @@ def extract_verification_code(text, subject=""):
         if match:
             return match.group(1)
 
-    # 6 位数字兜底（排除常见噪声）
     for code in re.findall(r">\s*(\d{6})\s*<", content):
         if code != "177010":
             return code
@@ -1905,6 +1776,105 @@ def extract_verification_code(text, subject=""):
         if code != "177010":
             return code
     return None
+
+
+def snapshot_inbox_ids(dev_token, email=None, log_callback=None):
+    """发码前快照当前邮件 id（对齐 any-auto-register before_ids）。"""
+    if mail_providers is not None and mail_providers.import_ok():
+        return mail_providers.snapshot_ids(log_callback=log_callback)
+    provider = get_email_provider()
+    ids = set()
+    try:
+        if provider == "cloudflare":
+            api_base = get_cloudflare_api_base()
+            if api_base and dev_token:
+                for msg in cloudflare_get_messages(api_base, dev_token) or []:
+                    if not isinstance(msg, dict):
+                        continue
+                    mid = str(msg.get("id") or msg.get("msgid") or "").strip()
+                    if mid:
+                        ids.add(mid)
+        elif provider == "duckmail" and dev_token:
+            # duckmail list if available via existing helpers
+            try:
+                messages = duckmail_list_messages(dev_token)  # type: ignore[name-defined]
+            except Exception:
+                messages = []
+            for msg in messages or []:
+                if isinstance(msg, dict):
+                    mid = str(msg.get("id") or "").strip()
+                    if mid:
+                        ids.add(mid)
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[Debug] 快照收件箱 id 失败（可忽略）: {exc}")
+    if log_callback and ids:
+        log_callback(f"[*] 发码前收件箱已有 {len(ids)} 封邮件，将忽略旧信")
+    return ids
+
+
+def optional_public_get_oai_code(
+    provider,
+    dev_token,
+    email,
+    timeout=180,
+    poll_interval=3,
+    log_callback=None,
+    cancel_callback=None,
+    before_ids=None,
+    otp_sent_at=None,
+):
+    """Optional public backends using mailbox_core receive loop (not recommended for xAI)."""
+    if not _MAILBOX_CORE_OK or wait_code_from_messages is None:
+        raise Exception("mailbox_core 不可用")
+    proxies = get_proxies()
+    if provider == "tempmail_lol":
+        client = TempMailLolClient(proxies=proxies, http_get=http_get, http_post=http_post)
+        acct = MailboxAccount(email=email, token=dev_token, account_id=dev_token)
+
+        def list_messages():
+            return client.list_messages(acct)
+
+        return wait_code_from_messages(
+            list_messages,
+            before_ids=before_ids,
+            otp_sent_at=otp_sent_at,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            cancel_callback=cancel_callback,
+            sleep_fn=lambda s: sleep_with_cancel(s, cancel_callback),
+            code_pattern=GROK_CODE_PATTERN,
+            log_callback=log_callback,
+            provider_label="tempmail.lol",
+        )
+
+    # gptmail
+    api_base = str(config.get("gptmail_api_base") or "https://mail.chatgpt.org.uk").rstrip("/")
+    api_key = str(config.get("gptmail_api_key") or "").strip()
+    client = GPTMailClient(
+        api_base=api_base,
+        api_key=api_key,
+        domain=str(config.get("gptmail_domain") or config.get("defaultDomains") or "").strip(),
+        proxies=proxies,
+        http_get=http_get,
+    )
+    acct = MailboxAccount(email=email, token=dev_token or email, account_id=email)
+
+    def list_messages():
+        return client.list_messages(acct)
+
+    return wait_code_from_messages(
+        list_messages,
+        before_ids=before_ids,
+        otp_sent_at=otp_sent_at,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        cancel_callback=cancel_callback,
+        sleep_fn=lambda s: sleep_with_cancel(s, cancel_callback),
+        code_pattern=GROK_CODE_PATTERN,
+        log_callback=log_callback,
+        provider_label="gptmail",
+    )
 
 
 def duckmail_get_oai_code(
@@ -1968,13 +1938,62 @@ def cloudflare_get_oai_code(
     log_callback=None,
     cancel_callback=None,
     resend_callback=None,
+    before_ids=None,
+    otp_sent_at=None,
 ):
+    """Cloudflare / 自建 temp-email 收码。
+
+    接收方式对齐 any-auto-register：
+    - before_ids：发码前已有邮件 id，跳过旧信
+    - otp_sent_at：跳过发码前的时间戳邮件
+    - 统一 extract_verification_code（Grok ABC-DEF 优先）
+    """
     api_base = get_cloudflare_api_base()
     if not api_base:
         raise Exception("Cloudflare API Base 未配置")
+
+    # Prefer unified receive loop when mailbox_core is available
+    if _MAILBOX_CORE_OK and wait_code_from_messages is not None:
+        before = set(before_ids or set())
+        next_resend_at = time.time() + 35
+
+        def list_messages():
+            nonlocal next_resend_at
+            if resend_callback and time.time() >= next_resend_at:
+                try:
+                    resend_callback()
+                    if log_callback:
+                        log_callback("[*] 已触发重新发送验证码")
+                except Exception as exc:
+                    if log_callback:
+                        log_callback(f"[Debug] 触发重发验证码失败: {exc}")
+                next_resend_at = time.time() + 35
+            return cloudflare_get_messages(api_base, dev_token) or []
+
+        def detail_fetcher(msg):
+            mid = str(msg.get("id") or msg.get("msgid") or "").strip()
+            if not mid:
+                return {}
+            return cloudflare_get_message_detail(api_base, dev_token, mid) or {}
+
+        return wait_code_from_messages(
+            list_messages,
+            before_ids=before,
+            otp_sent_at=otp_sent_at,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            cancel_callback=cancel_callback,
+            sleep_fn=lambda s: sleep_with_cancel(s, cancel_callback),
+            code_pattern=GROK_CODE_PATTERN,
+            log_callback=log_callback,
+            detail_fetcher=detail_fetcher,
+            provider_label="Cloudflare",
+        )
+
+    # Fallback legacy loop (no mailbox_core)
     deadline = time.time() + timeout
-    # 同一封邮件正文可能延迟可读，允许多次重试解析，避免偶发漏码
     seen_attempts = {}
+    before = set(before_ids or set())
     next_resend_at = time.time() + 35
     while time.time() < deadline:
         raise_if_cancelled(cancel_callback)
@@ -2001,13 +2020,14 @@ def cloudflare_get_oai_code(
             msg_id = msg.get("id") or msg.get("msgid")
             if not msg_id:
                 continue
+            if str(msg_id) in before:
+                continue
             attempt = int(seen_attempts.get(msg_id, 0))
             if attempt >= 5:
                 continue
             seen_attempts[msg_id] = attempt + 1
             recipients = [t.get("address", "").lower() for t in (msg.get("to") or [])]
             msg_addr = str(msg.get("address", "")).lower()
-            # 优先匹配目标邮箱；若结构不一致也允许继续解析，避免接口字段漂移导致漏码
             address_matched = True
             if recipients:
                 address_matched = email.lower() in recipients
@@ -2872,12 +2892,20 @@ return false;
             """
         )
 
+    # any-auto-register style: snapshot inbox before waiting for OTP mail
+    before_ids = snapshot_inbox_ids(dev_token, email=email, log_callback=log_callback)
+    otp_sent_at = time.time()
+    if log_callback:
+        log_callback("[*] 开始轮询验证码邮件（忽略发码前旧信）")
+
     code = get_oai_code(
         dev_token,
         email,
         log_callback=log_callback,
         cancel_callback=cancel_callback,
         resend_callback=_resend_code,
+        before_ids=before_ids,
+        otp_sent_at=otp_sent_at,
     )
     if not code:
         raise Exception("获取验证码失败")
@@ -3918,7 +3946,7 @@ class GrokRegisterGUI:
         self.email_provider_combo = tk_option_menu(
             config_frame,
             self.email_provider_var,
-            ["tempmailer", "duckmail", "yyds", "cloudflare"],
+            ["cloudflare", "duckmail", "yyds"],
             width=12,
         )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)

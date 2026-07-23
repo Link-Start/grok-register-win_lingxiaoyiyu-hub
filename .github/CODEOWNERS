@@ -1,0 +1,19 @@
+# CODEOWNERS
+# https://docs.github.com/zh/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# 默认所有者
+* @lingxiaoyiyu-hub
+
+# 核心代码
+/grok_register_ttk.py @lingxiaoyiyu-hub
+/launcher.py @lingxiaoyiyu-hub
+/panel/ @lingxiaoyiyu-hub
+/lib/ @lingxiaoyiyu-hub
+
+# 配置与文档
+/config.example.json @lingxiaoyiyu-hub
+/README.md @lingxiaoyiyu-hub
+/requirements.txt @lingxiaoyiyu-hub
+
+# GitHub 配置
+/.github/ @lingxiaoyiyu-hub

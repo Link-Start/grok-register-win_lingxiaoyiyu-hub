@@ -10,6 +10,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -76,11 +77,26 @@ CPA_DIR = Path(os.environ.get("CPA_DIR", str(BASE_DIR / "data" / "cpa"))).resolv
 CPA_DIR.mkdir(parents=True, exist_ok=True)
 CPA_INDEX_PATH = CPA_DIR / "index.json"
 CPA_FAILED_PATH = CPA_DIR / "failed.jsonl"
+ARCHIVE_DIR = Path(
+    os.environ.get("ARCHIVE_DIR", str(BASE_DIR / "data" / "archive"))
+).resolve()
+ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 SSO2CPA_PATH = Path(
     os.environ.get("SSO2CPA_PATH", str(BASE_DIR / "lib"))
 ).resolve()
 AUTO_CPA = os.environ.get("AUTO_CPA", "1").strip() not in ("0", "false", "False", "no")
 CPA_DELAY = float(os.environ.get("CPA_DELAY", "1.0"))
+# workspace mode: register (本机注册) | upload (上传 SSO 整批替换)
+_workspace_mode = "register"
+_workspace_batch = 0
+_workspace_meta: Dict = {
+    "mode": "register",
+    "batch": 0,
+    "source": "",
+    "total": 0,
+    "queued": 0,
+    "updated_at": "",
+}
 # Hard wall-clock per register round (one account). Stuck process is killed, next round starts.
 DEFAULT_ROUND_TIMEOUT_SEC = 300
 # Optional: talk to local Clash Meta external-controller for node list.
@@ -102,6 +118,7 @@ try:
         cpa_to_sub2_account,
         convert_one,
         normalize_sso,
+        parse_uploaded_records,
         safe_filename as cpa_safe_filename,
         sso_fingerprint,
     )
@@ -112,6 +129,7 @@ except Exception as _e:  # pragma: no cover
     convert_one = None  # type: ignore
     build_sub2_payload = None  # type: ignore
     cpa_to_sub2_account = None  # type: ignore
+    parse_uploaded_records = None  # type: ignore
     normalize_sso = lambda t: (t or "").strip()  # type: ignore
     cpa_safe_filename = lambda s: re.sub(r"[^\w.@+-]+", "_", s or "unknown")[:100]  # type: ignore
     sso_fingerprint = lambda s: hashlib.sha256((s or "").encode()).hexdigest()  # type: ignore
@@ -419,11 +437,123 @@ def list_cpa_files() -> List[Path]:
     return sorted(CPA_DIR.glob("xai-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+def active_identity_sets() -> Tuple[Set[str], Set[str]]:
+    """Emails + SSO fingerprints currently visible on the panel."""
+    emails: Set[str] = set()
+    fps: Set[str] = set()
+    for acc in unique_accounts():
+        email = str(acc.get("email") or "").strip().lower()
+        if email and email not in ("unknown",):
+            emails.add(email)
+        sso = normalize_sso(acc.get("sso") or "")
+        if sso:
+            fps.add(sso_fingerprint(sso))
+    return emails, fps
+
+
+def cpa_matches_active(obj: dict, emails: Set[str], fps: Set[str]) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    sso = normalize_sso(obj.get("sso") or "")
+    if sso and sso_fingerprint(sso) in fps:
+        return True
+    email = str(obj.get("email") or "").strip().lower()
+    if email and email in emails:
+        return True
+    return False
+
+
+def list_active_cpa_files() -> List[Path]:
+    """CPA files that belong to current panel accounts only."""
+    emails, fps = active_identity_sets()
+    if not emails and not fps:
+        return []
+    out: List[Path] = []
+    for p in list_cpa_files():
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if cpa_matches_active(obj, emails, fps):
+            out.append(p)
+    return out
+
+
+def prune_orphan_cpa() -> int:
+    """Delete CPA JSON not matching any current panel account."""
+    emails, fps = active_identity_sets()
+    removed = 0
+    removed_fps: Set[str] = set()
+    for p in list(list_cpa_files()):
+        try:
+            obj = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            try:
+                p.unlink()
+                removed += 1
+            except Exception:
+                pass
+            continue
+        keep = bool(emails or fps) and cpa_matches_active(obj, emails, fps)
+        if keep:
+            continue
+        try:
+            sso = normalize_sso((obj or {}).get("sso") or "")
+            if sso:
+                removed_fps.add(sso_fingerprint(sso))
+            p.unlink()
+            removed += 1
+        except Exception:
+            pass
+    if removed_fps or removed:
+        # drop index entries for removed fingerprints; rebuild lightly
+        try:
+            items: Dict[str, dict] = {}
+            if CPA_INDEX_PATH.exists():
+                data = json.loads(CPA_INDEX_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("items"), dict):
+                    items = {
+                        k: v
+                        for k, v in data["items"].items()
+                        if k not in removed_fps
+                    }
+            # also drop index rows whose file is gone
+            alive_files = {p.name for p in list_cpa_files()}
+            items = {
+                k: v
+                for k, v in items.items()
+                if not isinstance(v, dict)
+                or not v.get("file")
+                or v.get("file") in alive_files
+            }
+            CPA_INDEX_PATH.write_text(
+                json.dumps(
+                    {
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        "items": items,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+        with _cpa_lock:
+            if removed_fps:
+                _cpa_done.difference_update(removed_fps)
+            # recount done roughly by remaining files
+            _cpa_state["ok"] = len(list_cpa_files())
+    return removed
+
+
 def cpa_stats() -> dict:
     with _cpa_lock:
         st = dict(_cpa_state)
         done_n = len(_cpa_done)
-    files = list_cpa_files()
+    # UI / download count = current panel batch only
+    files = list_active_cpa_files()
     st["files"] = len(files)
     st["done"] = done_n
     st["dir"] = str(CPA_DIR)
@@ -592,6 +722,179 @@ def start_cpa_worker() -> None:
     th.start()
 
 
+def _drain_cpa_queue() -> int:
+    """Drop pending convert jobs without processing them."""
+    n = 0
+    while True:
+        try:
+            item = _cpa_q.get_nowait()
+        except queue.Empty:
+            break
+        if item is None:
+            break
+        n += 1
+        try:
+            _cpa_q.task_done()
+        except Exception:
+            pass
+    with _cpa_lock:
+        _cpa_inflight.clear()
+        _cpa_state["pending"] = 0
+        _cpa_state["running"] = False
+    return n
+
+
+def _archive_current_workspace(reason: str = "replace") -> Optional[Path]:
+    """Move current accounts_*.txt + data/cpa into data/archive/<ts>/."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = ARCHIVE_DIR / f"{ts}_{reason}"
+    moved_any = False
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        acc_dir = dest / "accounts"
+        cpa_dir = dest / "cpa"
+        acc_dir.mkdir(exist_ok=True)
+        cpa_dir.mkdir(exist_ok=True)
+        for p in list_account_files():
+            try:
+                shutil.move(str(p), str(acc_dir / p.name))
+                moved_any = True
+            except Exception as e:
+                log_line(f"[WORKSPACE] archive account fail {p.name}: {e}")
+        if CPA_DIR.exists():
+            for p in CPA_DIR.iterdir():
+                if not p.is_file():
+                    continue
+                try:
+                    shutil.move(str(p), str(cpa_dir / p.name))
+                    moved_any = True
+                except Exception as e:
+                    log_line(f"[WORKSPACE] archive cpa fail {p.name}: {e}")
+        if moved_any:
+            log_line(f"[WORKSPACE] 已归档旧数据 → {dest}")
+            return dest
+        # empty archive folder: remove
+        try:
+            shutil.rmtree(dest, ignore_errors=True)
+        except Exception:
+            pass
+    except Exception as e:
+        log_line(f"[WORKSPACE] archive error: {e}")
+    return None
+
+
+def reset_workspace_for_upload(source_name: str, total: int) -> dict:
+    """Whole-batch replace: archive old data, clear CPA state, enter upload mode."""
+    global _workspace_mode, _workspace_batch, _workspace_meta
+    drained = _drain_cpa_queue()
+    archived = _archive_current_workspace("upload")
+    with _cpa_lock:
+        _cpa_done.clear()
+        _cpa_inflight.clear()
+        _cpa_state["pending"] = 0
+        _cpa_state["ok"] = 0
+        _cpa_state["fail"] = 0
+        _cpa_state["last_error"] = ""
+        _cpa_state["last_ok_email"] = ""
+        _cpa_state["running"] = False
+    # ensure empty cpa dir
+    CPA_DIR.mkdir(parents=True, exist_ok=True)
+    for leftover in list(CPA_DIR.glob("*")):
+        if leftover.is_file():
+            try:
+                leftover.unlink()
+            except Exception:
+                pass
+    _workspace_mode = "upload"
+    _workspace_batch += 1
+    _workspace_meta = {
+        "mode": "upload",
+        "batch": _workspace_batch,
+        "source": source_name or "upload.txt",
+        "total": int(total or 0),
+        "queued": 0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "archived": str(archived) if archived else "",
+        "drained": drained,
+    }
+    return dict(_workspace_meta)
+
+
+def set_workspace_register_mode(reason: str = "register") -> None:
+    """Switch UI mode marker back to register (does not delete upload batch)."""
+    global _workspace_mode, _workspace_meta
+    _workspace_mode = "register"
+    _workspace_meta = {
+        "mode": "register",
+        "batch": _workspace_batch,
+        "source": reason,
+        "total": 0,
+        "queued": 0,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def workspace_stats() -> dict:
+    meta = dict(_workspace_meta)
+    meta["mode"] = _workspace_mode
+    meta["account_count"] = len(unique_accounts())
+    meta["cpa_files"] = len(list_cpa_files())
+    return meta
+
+
+def write_upload_accounts_file(records: List[dict], source_name: str = "") -> Path:
+    """Write current batch as single accounts_upload_*.txt (email----password----sso)."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = BASE_DIR / f"accounts_upload_{ts}.txt"
+    lines = []
+    for rec in records:
+        email = str(rec.get("email") or "").strip() or "unknown"
+        password = str(rec.get("password") or "").strip()
+        sso = normalize_sso(rec.get("sso") or "")
+        if not sso:
+            continue
+        lines.append(f"{email}----{password}----{sso}")
+    path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    return path
+
+
+def parse_upload_file_bytes(raw: bytes, filename: str = "") -> List[dict]:
+    """Parse uploaded SSO txt/json into {email,password,sso} records."""
+    if parse_uploaded_records is None:
+        raise RuntimeError(f"sso2cpa core unavailable: {_CPA_CORE_ERR}")
+    base = parse_uploaded_records(raw, filename=filename or "")
+    # recover password when line is email----password----sso
+    text = raw.decode("utf-8", "replace")
+    pass_map: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "----" in line:
+            parts = line.split("----")
+            if len(parts) >= 3:
+                email = parts[0].strip()
+                password = parts[1].strip()
+                sso = normalize_sso(parts[-1])
+                if sso:
+                    pass_map[sso] = password
+                    if email:
+                        pass_map[f"e:{email.lower()}"] = password
+    out = []
+    for rec in base:
+        sso = normalize_sso(rec.get("sso") or "")
+        if not sso:
+            continue
+        email = str(rec.get("email") or "").strip()
+        password = (
+            str(rec.get("password") or "").strip()
+            or pass_map.get(sso, "")
+            or pass_map.get(f"e:{email.lower()}", "")
+        )
+        out.append({"email": email, "password": password, "sso": sso})
+    return out
+
+
 def to_grok2api_pool(accounts: List[dict]) -> dict:
     """grok2api-style local token pool using web SSO tokens."""
     tokens = []
@@ -622,99 +925,145 @@ def load_config() -> dict:
 
 
 def email_config_public(cfg: Optional[dict] = None) -> dict:
-    """Email settings for panel UI (custom maps to cloudflare_* backend)."""
+    """Email settings for panel UI (multi-provider dropdown)."""
     c = cfg if isinstance(cfg, dict) else load_config()
-    provider = str(c.get("email_provider") or "tempmailer").strip().lower()
-    # inboxkitten.com 已被 xAI 拒绝，旧配置自动映射为 tempmailer
-    if provider in ("inboxkitten", "inbox_kitten"):
-        provider = "tempmailer"
-    if provider == "cloudflare":
-        ui_provider = "custom"
-    elif provider == "tempmailer":
-        ui_provider = "tempmailer"
-    else:
-        # unknown / unpaid providers -> show as custom if base set, else tempmailer
-        ui_provider = "custom" if c.get("cloudflare_api_base") else "tempmailer"
+    provider = str(c.get("email_provider") or "cfworker").strip().lower()
+    # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
+    # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                    "tempmail_lol", "duckmail", "gptmail"):
+        provider = "cfworker"
+    # alias yyds -> maliapi for UI
+    if provider == "yyds":
+        provider = "maliapi"
+
+    choices = [
+        {"id": "cfworker", "label": "CF Worker", "group": "自建"},
+        {"id": "moemail", "label": "MoeMail", "group": "自建"},
+        {"id": "freemail", "label": "Freemail", "group": "自建"},
+        {"id": "opentrashmail", "label": "OpenTrashMail", "group": "自建"},
+        {"id": "maliapi", "label": "MaliAPI", "group": "付费"},
+        {"id": "luckmail", "label": "LuckMail", "group": "付费"},
+        {"id": "skymail", "label": "SkyMail", "group": "付费"},
+        {"id": "cloudmail", "label": "CloudMail", "group": "付费"},
+        {"id": "laoudo", "label": "Laoudo", "group": "付费"},
+    ]
+    valid = {x["id"] for x in choices}
+    if provider not in valid:
+        provider = "cfworker"
+
     return {
-        "provider": ui_provider,
+        "provider": provider,
+        "choices": choices,
         "email_failover": bool(c.get("email_failover", True)),
-        "tempmailer_domain": str(c.get("tempmailer_domain") or c.get("defaultDomains") or "").strip(),
-        "custom_api_base": str(c.get("cloudflare_api_base") or "").strip(),
-        "custom_api_key": str(c.get("cloudflare_api_key") or "").strip(),
-        "custom_auth_mode": (
-            "bearer"
-            if str(c.get("cloudflare_auth_mode") or "").strip().lower()
-            in ("auth", "bearer", "authorization")
-            else str(c.get("cloudflare_auth_mode") or "x-admin-auth").strip()
-        ),
-        "custom_domain": str(c.get("defaultDomains") or "").strip(),
-        "custom_path_accounts": str(
-            c.get("cloudflare_path_accounts") or "/admin/new_address"
-        ).strip(),
-        "custom_path_messages": str(
-            c.get("cloudflare_path_messages") or "/api/mails"
-        ).strip(),
-        "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
-        "hint": "",
+        # cfworker (cloudflare_temp_email protocol; cloudflare_*/defaultDomains kept as legacy aliases)
+        "cfworker_api_url": str(c.get("cfworker_api_url") or c.get("cloudflare_api_base") or "").strip(),
+        "cfworker_admin_token": str(c.get("cfworker_admin_token") or c.get("cloudflare_api_key") or "").strip(),
+        "cfworker_domain": str(c.get("cfworker_domain") or c.get("defaultDomains") or "").strip(),
+        "cfworker_custom_auth": str(c.get("cfworker_custom_auth") or "").strip(),
+        "cfworker_subdomain": str(c.get("cfworker_subdomain") or "").strip(),
+        # providers
+        "moemail_api_url": str(c.get("moemail_api_url") or "https://sall.cc").strip(),
+        "moemail_api_key": str(c.get("moemail_api_key") or "").strip(),
+        "maliapi_base_url": str(c.get("maliapi_base_url") or "https://maliapi.215.im/v1").strip(),
+        "maliapi_api_key": str(c.get("maliapi_api_key") or c.get("yyds_api_key") or "").strip(),
+        "maliapi_domain": str(c.get("maliapi_domain") or "").strip(),
+        "luckmail_base_url": str(c.get("luckmail_base_url") or "https://mails.luckyous.com/").strip(),
+        "luckmail_api_key": str(c.get("luckmail_api_key") or "").strip(),
+        "luckmail_project_code": str(c.get("luckmail_project_code") or "grok").strip(),
+        "luckmail_domain": str(c.get("luckmail_domain") or "").strip(),
+        "skymail_api_base": str(c.get("skymail_api_base") or "https://api.skymail.ink").strip(),
+        "skymail_token": str(c.get("skymail_token") or "").strip(),
+        "skymail_domain": str(c.get("skymail_domain") or "").strip(),
+        "cloudmail_api_base": str(c.get("cloudmail_api_base") or "").strip(),
+        "cloudmail_admin_email": str(c.get("cloudmail_admin_email") or "").strip(),
+        "cloudmail_admin_password": str(c.get("cloudmail_admin_password") or "").strip(),
+        "cloudmail_domain": str(c.get("cloudmail_domain") or "").strip(),
+        "freemail_api_url": str(c.get("freemail_api_url") or "").strip(),
+        "freemail_admin_token": str(c.get("freemail_admin_token") or "").strip(),
+        "freemail_domain": str(c.get("freemail_domain") or "").strip(),
+        "opentrashmail_api_url": str(c.get("opentrashmail_api_url") or "").strip(),
+        "opentrashmail_domain": str(c.get("opentrashmail_domain") or "").strip(),
+        "opentrashmail_password": str(c.get("opentrashmail_password") or "").strip(),
+        "laoudo_auth": str(c.get("laoudo_auth") or "").strip(),
+        "laoudo_email": str(c.get("laoudo_email") or "").strip(),
+        "laoudo_account_id": str(c.get("laoudo_account_id") or "").strip(),
     }
 
 
 def apply_email_config_from_ui(data: dict) -> dict:
     """Merge panel email form into config.json and return public view."""
     cfg = load_config()
-    provider = str(data.get("provider") or "tempmailer").strip().lower()
-    if provider in ("inboxkitten", "inbox_kitten"):
-        provider = "tempmailer"
-    if provider not in ("tempmailer", "custom"):
-        raise ValueError("provider 必须是 tempmailer / custom")
+    provider = str(data.get("provider") or "cfworker").strip().lower()
+    # cloudflare/custom/tempmailer are all aliases of cfworker (same protocol)
+    # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+    if provider in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                    "tempmail_lol", "duckmail", "gptmail"):
+        provider = "cfworker"
+    if provider == "yyds":
+        provider = "maliapi"
+
+    valid = {
+        "cfworker", "moemail",
+        "maliapi", "luckmail", "skymail", "cloudmail", "freemail", "opentrashmail", "laoudo",
+    }
+    if provider not in valid:
+        raise ValueError(f"不支持的邮箱源: {provider}")
 
     cfg["email_failover"] = bool(data.get("email_failover", True))
+    cfg["email_provider"] = provider
+    cfg["email_providers"] = [provider]
 
-    if provider == "tempmailer":
-        cfg["email_provider"] = "tempmailer"
-        domain = str(data.get("tempmailer_domain") or cfg.get("tempmailer_domain") or "bluenode.cc").strip()
-        cfg["tempmailer_domain"] = domain
-        cfg["tempmailer_domains"] = [domain] if domain else cfg.get("tempmailer_domains") or []
-        cfg["defaultDomains"] = domain or cfg.get("defaultDomains") or ""
-        chain = ["tempmailer"]
-        if str(cfg.get("cloudflare_api_base") or "").strip():
-            chain.append("cloudflare")
-        cfg["email_providers"] = chain
-    else:
-        # custom -> cloudflare backend channel
-        api_base = str(data.get("custom_api_base") or "").strip().rstrip("/")
-        if not api_base:
-            raise ValueError("自定义模式必须填写 API 地址 cloudflare_api_base")
-        cfg["email_provider"] = "cloudflare"
-        cfg["cloudflare_api_base"] = api_base
-        cfg["cloudflare_api_key"] = str(data.get("custom_api_key") or "").strip()
-        mode = str(data.get("custom_auth_mode") or "x-admin-auth").strip().lower()
-        if mode not in ("none", "bearer", "x-api-key", "x-admin-auth", "query-key"):
-            mode = "x-admin-auth"
-        # register: x-api-key / x-admin-auth / query-key / none; anything else + key => Authorization Bearer
-        if mode == "bearer":
-            cfg["cloudflare_auth_mode"] = "auth"
-        else:
-            cfg["cloudflare_auth_mode"] = mode
-        domain = str(data.get("custom_domain") or "").strip()
-        cfg["defaultDomains"] = domain
-        cfg["cloudflare_path_accounts"] = str(
-            data.get("custom_path_accounts") or "/admin/new_address"
-        ).strip() or "/admin/new_address"
-        cfg["cloudflare_path_messages"] = str(
-            data.get("custom_path_messages") or "/api/mails"
-        ).strip() or "/api/mails"
-        cfg["cloudflare_path_token"] = str(
-            data.get("custom_path_token") or "/api/token"
-        ).strip() or "/api/token"
-        if cfg.get("email_failover"):
-            cfg["email_providers"] = ["cloudflare", "tempmailer"]
-        else:
-            cfg["email_providers"] = ["cloudflare"]
+    def g(key, default=""):
+        return str(data.get(key, cfg.get(key, default)) or default).strip()
 
+    # cfworker fields (also sync to cloudflare_*/defaultDomains legacy keys for back-compat)
+    cfg["cfworker_api_url"] = g("cfworker_api_url")
+    cfg["cfworker_admin_token"] = g("cfworker_admin_token")
+    cfg["cfworker_domain"] = g("cfworker_domain")
+    cfg["cfworker_custom_auth"] = g("cfworker_custom_auth")
+    cfg["cfworker_subdomain"] = g("cfworker_subdomain")
+    cfg["cloudflare_api_base"] = cfg["cfworker_api_url"]
+    cfg["cloudflare_api_key"] = cfg["cfworker_admin_token"]
+    cfg["defaultDomains"] = cfg["cfworker_domain"]
+
+    for key in (
+        "moemail_api_url", "moemail_api_key",
+        "maliapi_base_url", "maliapi_api_key", "maliapi_domain",
+        "luckmail_base_url", "luckmail_api_key", "luckmail_project_code", "luckmail_domain",
+        "skymail_api_base", "skymail_token", "skymail_domain",
+        "cloudmail_api_base", "cloudmail_admin_email", "cloudmail_admin_password", "cloudmail_domain",
+        "freemail_api_url", "freemail_admin_token", "freemail_domain",
+        "opentrashmail_api_url", "opentrashmail_domain", "opentrashmail_password",
+        "laoudo_auth", "laoudo_email", "laoudo_account_id",
+    ):
+        if key in data or key in cfg:
+            cfg[key] = g(key, cfg.get(key, ""))
+
+    # sync yyds keys for legacy
+    if cfg.get("maliapi_api_key") and not cfg.get("yyds_api_key"):
+        cfg["yyds_api_key"] = cfg["maliapi_api_key"]
+
+    # required fields soft-check for selected provider
+    need = {
+        "cfworker": ["cfworker_api_url"],
+        "luckmail": ["luckmail_api_key"],
+        "skymail": ["skymail_token"],
+        "cloudmail": ["cloudmail_api_base"],
+        "freemail": ["freemail_api_url"],
+        "opentrashmail": ["opentrashmail_api_url"],
+        "laoudo": ["laoudo_email"],
+        "maliapi": ["maliapi_api_key"],
+    }
+    for field in need.get(provider, []):
+        if not str(cfg.get(field) or "").strip():
+            raise ValueError(f"邮箱源 {provider} 需要配置: {field}")
+
+    cfg.pop("tempmailer_api_base", None)
+    cfg.pop("tempmailer_domain", None)
+    cfg.pop("tempmailer_domains", None)
     save_config(cfg)
     return email_config_public(cfg)
-
 
 
 def resolve_proxy_url() -> str:
@@ -991,7 +1340,7 @@ def _run_one_round(round_no: int, total: int) -> bool:
     global PROXY_URL
     PROXY_URL = cfg_run["proxy"]
     os.environ["GROK_PROXY"] = PROXY_URL
-    cfg_run.setdefault("email_provider", "tempmailer")
+    cfg_run.setdefault("email_provider", "cfworker")
     engine = str(cfg_run.get("browser_engine") or "chromium").strip().lower()
     if engine in ("camoufox", "firefox", "headless", "cfox"):
         engine = "camoufox"
@@ -1042,6 +1391,52 @@ def _run_one_round(round_no: int, total: int) -> bool:
         f"[*] proxy={PROXY_URL} engine={engine_label} python={VENV_PYTHON} "
         f"round_timeout={round_timeout}s"
     )
+
+    # 注册前检查邮箱源是否可用
+    try:
+        mail_cfg = load_config()
+        mail_prov = str(mail_cfg.get("email_provider") or "cfworker").strip().lower()
+        # cloudflare/custom/tempmailer are all aliases of cfworker
+        # tempmail_lol/duckmail/gptmail: removed public providers (xAI 拒收), fall back to cfworker
+        if mail_prov in ("tempmailer", "inboxkitten", "inbox_kitten", "custom", "cloudflare",
+                         "tempmail_lol", "duckmail", "gptmail"):
+            mail_prov = "cfworker"
+        if mail_prov == "yyds":
+            mail_prov = "maliapi"
+        # no-key providers
+        free_ok = mail_prov in ("moemail",)
+        has_cf = bool(str(mail_cfg.get("cfworker_api_url") or mail_cfg.get("cloudflare_api_base") or "").strip())
+        has_luck = bool(str(mail_cfg.get("luckmail_api_key") or "").strip())
+        has_mali = bool(str(mail_cfg.get("maliapi_api_key") or mail_cfg.get("yyds_api_key") or "").strip())
+        has_sky = bool(str(mail_cfg.get("skymail_token") or "").strip())
+        has_cloud = bool(str(mail_cfg.get("cloudmail_api_base") or "").strip())
+        has_free = bool(str(mail_cfg.get("freemail_api_url") or "").strip())
+        has_otm = bool(str(mail_cfg.get("opentrashmail_api_url") or "").strip())
+        has_lao = bool(str(mail_cfg.get("laoudo_email") or "").strip())
+        ok = free_ok
+        if mail_prov == "cfworker":
+            ok = has_cf
+        elif mail_prov == "luckmail":
+            ok = has_luck
+        elif mail_prov == "maliapi":
+            ok = has_mali
+        elif mail_prov == "skymail":
+            ok = has_sky
+        elif mail_prov == "cloudmail":
+            ok = has_cloud
+        elif mail_prov == "freemail":
+            ok = has_free
+        elif mail_prov == "opentrashmail":
+            ok = has_otm
+        elif mail_prov == "laoudo":
+            ok = has_lao
+        if not ok:
+            log_line(f"[!] 邮箱源 {mail_prov} 尚未配置完整，请到面板「邮箱服务」填写后保存")
+            return False
+        log_line(f"[*] 邮箱源: {mail_prov}")
+    except Exception as e:
+        log_line(f"[!] 检查邮箱配置失败: {e}")
+        return False
 
     # Camoufox 首次要下载浏览器二进制，不计入 5 分钟注册超时
     if engine == "camoufox":
@@ -1377,178 +1772,321 @@ INDEX_HTML = r"""
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Grok Register 面板</title>
+  <title>Grok 注册控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root{
-      --bg:#0b0e14;--bg2:#0f131c;--card:#141a26;--card2:#1a2130;--fg:#eef2fb;--muted:#8b97b0;--muted2:#6b7793;
-      --accent:#6ea8fe;--accent2:#4f8cff;--ok:#3dd68c;--bad:#ff7b7b;--warn:#ffb454;
-      --line:#222b3d;--line2:#2c3650;--chip:#1c2434;--chip2:#222c40;
+      --paper:#f7f4ed;--paper-2:#efebe0;--ink:#1a1a18;--ink-2:#2a2a26;
+      --steel:#6b685f;--steel-2:#9a968a;--line:#d8d3c4;
+      --rust:#c8351a;--amber:#d98324;--ok:#2f6b2f;
+      --log-bg:#1a1a18;--log-fg:#d8d3c4;--log-dim:#9a968a;
+      --font-display:"Bricolage Grotesque","Noto Sans SC",sans-serif;
+      --font-body:"IBM Plex Sans","Noto Sans SC",sans-serif;
+      --font-mono:"IBM Plex Mono","Noto Sans SC",monospace;
     }
     *{box-sizing:border-box}
-    body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:
-      radial-gradient(1200px 600px at 12% -18%,#1a2540 0%,transparent 55%),
-      radial-gradient(900px 500px at 92% 8%,#1a1f3a 0%,transparent 50%),
-      var(--bg);color:var(--fg);min-height:100vh;-webkit-font-smoothing:antialiased}
-    .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
-    header{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--line)}
-    .brand{display:flex;align-items:center;gap:14px}
-    .logo{width:42px;height:42px;border-radius:12px;background:#000;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;flex-shrink:0;box-shadow:0 6px 18px rgba(0,0,0,.35);letter-spacing:-1px}
-    h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.3px} .sub{color:var(--muted);font-size:12.5px;margin-top:3px}
-    .actions{display:flex;flex-wrap:wrap;gap:10px}
-    a.btn,button.btn{border:1px solid var(--line2);background:var(--chip);color:var(--fg);padding:10px 14px;border-radius:10px;text-decoration:none;font-size:13px;cursor:pointer;transition:all .15s ease;display:inline-flex;align-items:center;gap:6px}
-    a.btn:hover,button.btn:hover{background:var(--chip2);border-color:var(--accent);transform:translateY(-1px)}
-    a.btn:active,button.btn:active{transform:translateY(0)}
-    a.btn.primary,button.btn.primary{background:linear-gradient(135deg,var(--accent2),var(--accent));border-color:transparent;color:#fff;font-weight:600;box-shadow:0 4px 12px rgba(79,140,255,.3)}
-    a.btn.primary:hover,button.btn.primary:hover{box-shadow:0 6px 18px rgba(79,140,255,.45)}
-    a.btn.ok,button.btn.ok{background:linear-gradient(135deg,#1f9d63,#3dd68c);border:0;color:#042;font-weight:600;box-shadow:0 4px 12px rgba(61,214,140,.25)}
-    a.btn.ok:hover,button.btn.ok:hover{box-shadow:0 6px 18px rgba(61,214,140,.4)}
-    a.btn.sub2,button.btn.sub2{background:linear-gradient(135deg,#6d28d9,#a78bfa);border:0;color:#fff;font-weight:600;box-shadow:0 4px 12px rgba(167,139,250,.28)}
-    a.btn.sub2:hover,button.btn.sub2:hover{box-shadow:0 6px 18px rgba(167,139,250,.45)}
-    a.btn.danger,button.btn.danger{background:#2a1717;border-color:#5a2b2b;color:#ffb4b4}
-    a.btn.danger:hover,button.btn.danger:hover{background:#381c1c}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0 20px}
-    .stat{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .15s}
-    .stat:hover{border-color:var(--accent)}
-    .stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.7}
-    .stat .k{color:var(--muted2);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
-    .stat .v{font-size:22px;font-weight:700;margin-top:6px;color:var(--fg)}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,.15)}
-    .card h2{margin:0 0 14px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
-    .card h2::before{content:"";width:3px;height:14px;background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:2px}
-    .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
-    label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
-    input,select{background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:10px 12px;min-width:150px;font-size:13px;transition:border-color .15s;font-family:inherit}
-    input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
-    input[type="checkbox"]{width:auto;min-width:0;padding:0;margin:0;background:transparent;border:0;border-radius:0;appearance:auto;-webkit-appearance:auto;cursor:pointer}
+    body{margin:0;font-family:var(--font-body);background:var(--paper);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
+    .wrap{max-width:1240px;margin:0 auto;padding:0 20px 56px}
+
+    header{display:flex;align-items:stretch;flex-wrap:wrap;border:1px solid var(--ink);background:var(--ink);color:var(--paper)}
+    .brand{display:flex;align-items:center;gap:14px;padding:14px 18px;flex:1}
+    .logo{width:38px;height:38px;border:1px solid var(--paper);display:grid;place-items:center;font-family:var(--font-display);font-weight:800;font-size:20px;background:var(--rust);color:var(--paper);letter-spacing:-1px;flex-shrink:0}
+    h1{margin:0;font-family:var(--font-display);font-weight:800;font-size:24px;letter-spacing:-.5px;line-height:1}
+    h1 .slash{color:var(--rust)}
+    .sub{font-family:var(--font-mono);font-size:11px;color:#9a968a;margin-top:4px;letter-spacing:.5px}
+    .actions{display:flex;flex-wrap:wrap;align-items:stretch}
+    .actions .btn{border:0;border-right:1px solid var(--paper);background:transparent;color:var(--paper);padding:14px 18px;border-radius:0;text-decoration:none;font-family:var(--font-body);font-size:12.5px;font-weight:500;cursor:pointer;transition:background .12s;display:inline-flex;align-items:center;gap:6px}
+    .actions .btn:last-child{border-right:0}
+    .actions .btn:hover{background:var(--rust)}
+
+    a.btn,button.btn{border:1px solid var(--ink);background:var(--paper);color:var(--ink);padding:10px 16px;border-radius:2px;text-decoration:none;font-size:12.5px;font-family:var(--font-body);font-weight:500;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:6px}
+    a.btn:hover,button.btn:hover{background:var(--ink);color:var(--paper)}
+    a.btn:active,button.btn:active{transform:translateY(1px)}
+    a.btn.primary,button.btn.primary{background:var(--rust);color:var(--paper);border-color:var(--ink)}
+    a.btn.primary:hover,button.btn.primary:hover{background:var(--ink)}
+    a.btn.ok,button.btn.ok{background:var(--ok);color:#fff;border-color:var(--ink)}
+    a.btn.ok:hover,button.btn.ok:hover{background:var(--ink)}
+    a.btn.sub2,button.btn.sub2{background:var(--amber);color:var(--ink);border-color:var(--ink)}
+    a.btn.sub2:hover,button.btn.sub2:hover{background:var(--ink);color:var(--paper)}
+    a.btn.danger,button.btn.danger{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+    a.btn.danger:hover,button.btn.danger:hover{background:var(--rust)}
+    button.btn:disabled{opacity:.4;cursor:not-allowed}
+
+    .grid{display:grid;grid-template-columns:repeat(6,1fr);border:1px solid var(--ink);border-top:0;background:var(--paper)}
+    .stat{border-right:1px solid var(--ink);padding:16px;background:var(--paper)}
+    .stat:last-child{border-right:0}
+    .stat .k{font-family:var(--font-body);font-size:11px;color:var(--steel);letter-spacing:.3px}
+    .stat .v{font-family:var(--font-display);font-weight:700;font-size:30px;line-height:1;margin-top:10px;letter-spacing:-1px;color:var(--ink)}
+    .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--steel-2);vertical-align:middle}
+    .dot.run{background:var(--ok);box-shadow:0 0 0 2px rgba(47,107,47,.15);animation:pulse 1.4s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+    .card{border:1px solid var(--ink);border-top:0;background:var(--paper);position:relative}
+    .card h2{margin:0;padding:12px 16px;border-bottom:1px solid var(--line);font-family:var(--font-display);font-weight:600;font-size:16px;display:flex;align-items:center;gap:10px}
+    .card h2::before{content:"";width:3px;height:14px;background:var(--rust);border-radius:1px}
+    .card-body{padding:20px 16px}
+
+    .row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end}
+    label{display:flex;flex-direction:column;gap:6px;font-family:var(--font-body);font-size:11.5px;color:var(--steel)}
+    input,select{background:var(--paper);border:1px solid var(--line);color:var(--ink);border-radius:2px;padding:10px 12px;min-width:150px;font-size:13px;font-family:var(--font-mono);appearance:none;outline:none}
+    input:focus,select:focus{border-color:var(--ink)}
+    select{background-image:linear-gradient(45deg,transparent 50%,var(--ink) 50%),linear-gradient(135deg,var(--ink) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
+    input[type=number]{font-weight:500}
+    input[type=checkbox]{width:16px;height:16px;min-width:0;appearance:auto;accent-color:var(--rust);cursor:pointer}
+    input[type=file]{min-width:200px}
+
+    .mail-box{display:none;margin-top:14px;border:1px solid var(--line);padding:14px;background:var(--paper)}
+
+    .muted{color:var(--steel);font-size:12px}
+    .hint-box{font-family:var(--font-body);font-size:12px;color:var(--steel);border-left:2px solid var(--ink);background:transparent;padding:6px 14px;margin:12px 0;line-height:1.7}
+    code{background:var(--paper-2);padding:1px 5px;border-radius:2px;font-family:var(--font-mono);font-size:11px;color:var(--ink)}
+
+    #logbox{height:340px;overflow:auto;background:var(--log-bg);color:var(--log-fg);border:1px solid var(--ink);border-top:0;border-radius:0;padding:16px 18px;font-family:var(--font-mono);font-size:12px;line-height:1.7;white-space:pre-wrap}
+    #logbox::-webkit-scrollbar{width:10px}
+    #logbox::-webkit-scrollbar-track{background:var(--ink-2)}
+    #logbox::-webkit-scrollbar-thumb{background:var(--steel-2)}
+
     table{width:100%;border-collapse:collapse}
-    th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
-    th{color:var(--muted);background:var(--bg2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
-    tbody tr{transition:background .12s}
-    tbody tr:hover{background:rgba(110,168,254,.04)}
-    .mono{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;word-break:break-all;font-size:12.5px}
-    .muted{color:var(--muted)} .tag{display:inline-block;padding:3px 10px;border-radius:999px;background:var(--chip);color:var(--accent);font-size:12px;font-weight:500}
-    #logbox{height:340px;overflow:auto;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;color:var(--muted)}
-    #logbox::-webkit-scrollbar{width:8px}
-    #logbox::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
-    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;background:#555;vertical-align:middle}
-    .dot.run{background:var(--ok);box-shadow:0 0 10px var(--ok);animation:pulse 1.5s ease-in-out infinite}
-    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
-    .toast{position:fixed;right:20px;bottom:20px;background:var(--card2);border:1px solid var(--line2);padding:12px 16px;border-radius:10px;display:none;z-index:9;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13px}
-    code{background:var(--chip);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--accent)}
-    @media(max-width:800px){ th:nth-child(3),td:nth-child(3){display:none} .row{flex-direction:column;align-items:stretch} input,select{min-width:0} }
+    th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:12.5px;vertical-align:middle}
+    th{font-family:var(--font-body);font-size:11px;font-weight:500;color:var(--steel);background:var(--paper);border-bottom:1px solid var(--ink)}
+    tbody tr:hover{background:var(--paper-2)}
+    .mono{font-family:var(--font-mono);word-break:break-all}
+    .tag{display:inline-block;padding:2px 8px;border:1px solid var(--line);border-radius:2px;font-family:var(--font-mono);font-size:11px;font-weight:500;color:var(--ink)}
+
+    .toast{position:fixed;right:24px;bottom:24px;background:var(--ink);color:var(--paper);border:1px solid var(--ink);padding:12px 18px;border-radius:0;font-family:var(--font-body);font-size:12px;display:none;z-index:50}
+
+    @media(max-width:900px){
+      .grid{grid-template-columns:repeat(3,1fr)}
+      .stat:nth-child(3){border-right:0}
+      .row{flex-direction:column;align-items:stretch}
+      input,select{min-width:0}
+      .actions{width:100%}
+      .actions .btn{flex:1;justify-content:center}
+    }
   </style>
 </head>
 <body>
 <div class="wrap">
+
   <header>
     <div class="brand">
       <div class="logo">G</div>
       <div>
-        <h1>Grok Register</h1>
-        <div class="sub">{{ base_dir }} · 代理走本机 Clash（Clash Verge 默认 7897）</div>
+        <h1>GROK<span class="slash">//</span>注册控制台</h1>
+        <div class="sub">{{ base_dir }} · 本机代理 Clash 7897</div>
       </div>
     </div>
     <div class="actions">
-      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">⬇ 下载 SSO (TXT)</a>
-      <a class="btn ok" href="/download/cpa.zip" title="CPA OAuth JSON（CLIProxyAPI 可用）">⬇ 下载 CPA (JSON)</a>
-      <a class="btn sub2" href="/download/sub2.zip" title="Sub2API 官方导入包 type=sub2api-data：单账号 JSON + all 合集">⬇ 下载 Sub2 (JSON)</a>
+      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">⬇ SSO 账号包</a>
+      <a class="btn ok" href="/download/cpa.zip" title="CPA OAuth JSON（CLIProxyAPI 可用）">⬇ CPA 凭证</a>
+      <a class="btn sub2" href="/download/sub2.zip" title="Sub2API 官方导入包">⬇ Sub2 导入包</a>
     </div>
   </header>
 
   <div class="grid">
     <div class="stat"><div class="k">文件数</div><div class="v" id="st_files">{{ file_count }}</div></div>
     <div class="stat"><div class="k">SSO 账号</div><div class="v" id="st_accounts">{{ account_count }}</div></div>
-    <div class="stat"><div class="k">CPA 已转换</div><div class="v" id="st_cpa_ok">{{ cpa_files }}</div></div>
+    <div class="stat"><div class="k">已转 CPA</div><div class="v" id="st_cpa_ok">{{ cpa_files }}</div></div>
     <div class="stat"><div class="k">CPA 队列</div><div class="v" style="font-size:16px" id="st_cpa_q">0 / 0 / 0</div></div>
     <div class="stat"><div class="k">任务状态</div><div class="v" style="font-size:16px"><span class="dot" id="st_dot"></span><span id="st_status">idle</span></div></div>
     <div class="stat"><div class="k">注册 成功/失败</div><div class="v" style="font-size:16px"><span id="st_sf">0 / 0</span></div></div>
   </div>
 
   <div class="card">
-    <h2>启动注册</h2>
-    <div class="row">
-      <label>轮数
-        <input type="number" id="count" min="1" max="500" value="1"/>
-      </label>
-      <label>浏览器引擎
-        <select id="browser_engine" onchange="saveBrowserEngine()">
-          <option value="chromium">Chromium 有头（默认）</option>
-          <option value="camoufox">Camoufox 无头（反检测 Firefox）</option>
-        </select>
-      </label>
-      <button class="btn ok" id="btn_start" onclick="startJob()">▶ 开始注册</button>
-      <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
-      <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">补转未转换 CPA</button>
+    <h2>注册引擎</h2>
+    <div class="card-body">
+      <div class="row">
+        <label>轮数
+          <input type="number" id="count" min="1" max="500" value="1"/>
+        </label>
+        <label>浏览器引擎
+          <select id="browser_engine" onchange="saveBrowserEngine()">
+            <option value="chromium">Chromium 有头（默认）</option>
+            <option value="camoufox">Camoufox 无头（反检测）</option>
+          </select>
+        </label>
+        <button class="btn ok" id="btn_start" onclick="startJob()">▶ 开始注册</button>
+        <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
+        <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">⟳ 补转 CPA</button>
+      </div>
+      <div class="muted" style="margin-top:10px" id="cpa_hint">代理走本机 Clash · 注册成功后自动转 CPA</div>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">
-      代理走本机 Clash（config.json 的 proxy，常见 7897）。节点在 Clash 里选。注册成功后自动转 CPA。
-      Camoufox 首次使用会自动下载浏览器二进制。
-    </div>
-    <div class="muted" style="margin-top:8px;font-size:12px;line-height:1.55">
-      提示：绝大多数注册失败来自网络环境，而非脚本本身。实测机场节点里<strong style="color:var(--ok);font-weight:600">日本</strong>更稳；
-      新加坡 / 美国 / 德国成功率偏低。失败时请先在 Clash 换日本节点再试。
+  </div>
+
+  <div class="card">
+    <h2>SSO 续期上传</h2>
+    <div class="card-body">
+      <div class="hint-box">支持 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO。上传会整批替换当前工作区（旧数据归档到 <code>data/archive/</code>）。</div>
+      <div class="row">
+        <label style="flex:2">SSO 文件
+          <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
+        </label>
+        <button class="btn primary" id="btn_upload_convert" onclick="uploadSsoConvert()">⬆ 上传并转换</button>
+      </div>
+      <div class="muted" style="margin-top:10px" id="upload_hint">
+        当前模式：注册 · 未上传批次
+      </div>
     </div>
   </div>
 
   <div class="card">
     <h2>邮箱服务</h2>
-    <div class="row">
-      <label>邮箱源
-        <select id="email_provider" onchange="onEmailProviderChange()">
-          <option value="tempmailer">Tempmailer（内置免 key）</option>
-          <option value="custom">自定义（自建临时邮 API）</option>
-        </select>
-      </label>
-      <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
-        <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
-      </label>
-      <button class="btn primary" onclick="saveEmailConfig()">保存邮箱设置</button>
-    </div>
-    <div class="row" id="email_builtin_extra" style="margin-top:8px">
-      <label id="lbl_temp_domain">Tempmailer 域名
-        <input type="text" id="tempmailer_domain" placeholder="bluenode.cc"/>
-      </label>
-    </div>
-    <div id="email_custom_box" style="display:none;margin-top:10px">
-      <div class="muted" style="font-size:12px;margin-bottom:8px;line-height:1.5">
-        自定义对接自建临时邮箱（兼容 <b>cloudflare_temp_email</b> 一类）：程序调用「创建地址」拿到邮箱+token，再轮询「收信」提取 xAI 验证码。<br/>
-        常见管理员创建路径：<code>/admin/new_address</code>，鉴权头：<code>x-admin-auth</code>。
-      </div>
+    <div class="card-body">
       <div class="row">
-        <label style="flex:2">API 根地址
-          <input type="text" id="custom_api_base" placeholder="https://mail.example.com"/>
+        <label>邮箱源
+          <select id="email_provider" onchange="onEmailProviderChange()"></select>
         </label>
-        <label>API Key / 管理密码
-          <input type="password" id="custom_api_key" placeholder="可选，视你的服务而定"/>
+        <label style="min-width:auto;flex-direction:row;align-items:center;gap:8px;padding-bottom:10px">
+          <input type="checkbox" id="email_failover" style="width:auto;min-width:0"/> 失败时自动换源
         </label>
+        <button class="btn primary" onclick="saveEmailConfig()">💾 保存邮箱设置</button>
       </div>
-      <div class="row" style="margin-top:8px">
-        <label>鉴权方式
-          <select id="custom_auth_mode">
-            <option value="x-admin-auth">x-admin-auth（推荐，cf-temp-email 管理）</option>
-            <option value="bearer">Authorization Bearer</option>
-            <option value="x-api-key">X-API-Key</option>
-            <option value="query-key">URL ?key=</option>
-            <option value="none">无鉴权</option>
-          </select>
-        </label>
-        <label>邮箱域名（可空则服务端默认）
-          <input type="text" id="custom_domain" placeholder="mail.example.com"/>
-        </label>
+
+      <div id="box_cfworker" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="cfworker_api_url" placeholder="https://apimail.example.com"/>
+          </label>
+          <label>管理员令牌
+            <input type="password" id="cfworker_admin_token" placeholder="管理员密钥"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>域名
+            <input type="text" id="cfworker_domain" placeholder="mail.example.com"/>
+          </label>
+          <label>站点密码
+            <input type="password" id="cfworker_custom_auth" placeholder="可选"/>
+          </label>
+          <label>子域名
+            <input type="text" id="cfworker_subdomain" placeholder="可选"/>
+          </label>
+        </div>
       </div>
-      <div class="row" style="margin-top:8px">
-        <label>创建地址路径
-          <input type="text" id="custom_path_accounts" placeholder="/admin/new_address"/>
-        </label>
-        <label>收信路径
-          <input type="text" id="custom_path_messages" placeholder="/api/mails"/>
-        </label>
-        <label>Token 路径
-          <input type="text" id="custom_path_token" placeholder="/api/token"/>
-        </label>
+
+      <div id="box_moemail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="moemail_api_url" placeholder="https://sall.cc"/>
+          </label>
+          <label>API Key
+            <input type="password" id="moemail_api_key" placeholder="可选"/>
+          </label>
+        </div>
       </div>
+
+      <div id="box_maliapi" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="maliapi_base_url" placeholder="https://maliapi.215.im/v1"/>
+          </label>
+          <label>API Key
+            <input type="password" id="maliapi_api_key"/>
+          </label>
+          <label>域名
+            <input type="text" id="maliapi_domain" placeholder="可选"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_luckmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">平台地址
+            <input type="text" id="luckmail_base_url" placeholder="https://mails.luckyous.com"/>
+          </label>
+          <label>API Key
+            <input type="password" id="luckmail_api_key"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>项目代码
+            <input type="text" id="luckmail_project_code" placeholder="grok"/>
+          </label>
+          <label>域名
+            <input type="text" id="luckmail_domain" placeholder="可选"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_skymail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API 地址
+            <input type="text" id="skymail_api_base" placeholder="https://api.skymail.ink"/>
+          </label>
+          <label>令牌
+            <input type="password" id="skymail_token"/>
+          </label>
+          <label>域名
+            <input type="text" id="skymail_domain"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_cloudmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API 地址
+            <input type="text" id="cloudmail_api_base"/>
+          </label>
+          <label>管理员邮箱
+            <input type="text" id="cloudmail_admin_email"/>
+          </label>
+          <label>管理员密码
+            <input type="password" id="cloudmail_admin_password"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label>域名
+            <input type="text" id="cloudmail_domain"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_freemail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="freemail_api_url"/>
+          </label>
+          <label>管理员令牌
+            <input type="password" id="freemail_admin_token"/>
+          </label>
+          <label>域名
+            <input type="text" id="freemail_domain"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_opentrashmail" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label style="flex:2">API URL
+            <input type="text" id="opentrashmail_api_url"/>
+          </label>
+          <label>域名
+            <input type="text" id="opentrashmail_domain"/>
+          </label>
+          <label>密码
+            <input type="password" id="opentrashmail_password"/>
+          </label>
+        </div>
+      </div>
+
+      <div id="box_laoudo" class="mail-box" style="display:none;margin-top:10px">
+        <div class="row">
+          <label>Auth
+            <input type="password" id="laoudo_auth"/>
+          </label>
+          <label>邮箱
+            <input type="text" id="laoudo_email"/>
+          </label>
+          <label>账号 ID
+            <input type="text" id="laoudo_account_id"/>
+          </label>
+        </div>
+      </div>
+
+      <div class="muted" style="margin-top:10px;display:none" id="email_hint"></div>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px;display:none" id="email_hint"></div>
   </div>
 
   <div class="card">
@@ -1557,21 +2095,20 @@ INDEX_HTML = r"""
   </div>
 
   <div class="card" style="padding:0;overflow:hidden">
-    <div style="padding:14px 14px 0;display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between">
-      <h2 style="margin:0">账号文件</h2>
-      <div class="actions" style="margin:0">
+    <div style="padding:12px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--line)">
+      <h2 style="margin:0;border:0;padding:0">账号文件</h2>
+      <div style="margin-left:auto;display:flex;gap:8px">
         <button class="btn" type="button" onclick="toggleSelectAllFiles(true)">全选</button>
         <button class="btn" type="button" onclick="toggleSelectAllFiles(false)">取消全选</button>
         <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
       </div>
     </div>
-    <div class="muted" style="padding:8px 14px 0;font-size:12px">勾选已下载/不需要的 accounts_*.txt，删除后不会再出现在「下载 SSO」合并结果里。</div>
     {% if files %}
     <table>
       <thead>
         <tr>
           <th style="width:44px"><input type="checkbox" id="chk_all_files" onclick="toggleSelectAllFiles(this.checked)" title="全选"/></th>
-          <th>文件</th><th>数量</th><th>时间</th><th>操作</th>
+          <th>文件名</th><th>数量</th><th>修改时间</th><th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -1590,9 +2127,10 @@ INDEX_HTML = r"""
       </tbody>
     </table>
     {% else %}
-    <div style="padding:24px;color:var(--muted);text-align:center">暂无 accounts_*.txt</div>
+    <div style="padding:24px;color:var(--steel);text-align:center">暂无 accounts_*.txt</div>
     {% endif %}
   </div>
+
 </div>
 <div class="toast" id="toast"></div>
 <script>
@@ -1604,38 +2142,123 @@ async function api(url, opt){
   return j;
 }
 function onEmailProviderChange(){
-  const p=document.getElementById('email_provider').value;
-  const custom=document.getElementById('email_custom_box');
-  const builtin=document.getElementById('email_builtin_extra');
-  if(p==='custom'){
-    custom.style.display='block';
-    builtin.style.display='none';
-  }else{
-    custom.style.display='none';
-    builtin.style.display='flex';
-  }
+  const p=document.getElementById('email_provider').value||'cfworker';
+  document.querySelectorAll('.mail-box').forEach(el=>{ el.style.display='none'; });
+  const box=document.getElementById('box_'+p);
+  if(box) box.style.display='block';
 }
+function _val(id){const el=document.getElementById(id); return el?el.value:'';}
+function _set(id,v){const el=document.getElementById(id); if(el) el.value=v||'';}
+function _check(id,v){const el=document.getElementById(id); if(el) el.checked=!!v;}
 async function loadEmailConfig(){
   try{
     const j=await api('/api/config/email');
     const e=j.email||{};
-    let prov=e.provider||'tempmailer';
-    if(prov==='inboxkitten') prov='tempmailer';
-    document.getElementById('email_provider').value=prov;
-    document.getElementById('email_failover').checked=!!e.email_failover;
-    document.getElementById('tempmailer_domain').value=e.tempmailer_domain||'';
-    document.getElementById('custom_api_base').value=e.custom_api_base||'';
-    document.getElementById('custom_api_key').value=e.custom_api_key||'';
-    document.getElementById('custom_auth_mode').value=e.custom_auth_mode||'x-admin-auth';
-    document.getElementById('custom_domain').value=e.custom_domain||'';
-    document.getElementById('custom_path_accounts').value=e.custom_path_accounts||'/admin/new_address';
-    document.getElementById('custom_path_messages').value=e.custom_path_messages||'/api/mails';
-    document.getElementById('custom_path_token').value=e.custom_path_token||'/api/token';
+    const sel=document.getElementById('email_provider');
+    sel.innerHTML='';
+    const _groups={};
+    (e.choices||[]).forEach(c=>{
+      const g=c.group||'';
+      if(!_groups[g]) _groups[g]=[];
+      _groups[g].push(c);
+    });
+    ['自建','付费',''].forEach(g=>{
+      if(!_groups[g]) return;
+      let parent=sel;
+      if(g){
+        const og=document.createElement('optgroup');
+        og.label=g;
+        sel.appendChild(og);
+        parent=og;
+      }
+      _groups[g].forEach(c=>{
+        const o=document.createElement('option');
+        o.value=c.id; o.textContent=c.label;
+        parent.appendChild(o);
+      });
+    });
+    let prov=e.provider||'cfworker';
+    if(![...sel.options].some(o=>o.value===prov)) prov='cfworker';
+    sel.value=prov;
+    _check('email_failover', e.email_failover);
+    _set('cfworker_api_url', e.cfworker_api_url);
+    _set('cfworker_admin_token', e.cfworker_admin_token);
+    _set('cfworker_domain', e.cfworker_domain);
+    _set('cfworker_custom_auth', e.cfworker_custom_auth);
+    _set('cfworker_subdomain', e.cfworker_subdomain);
+    _set('moemail_api_url', e.moemail_api_url||'https://sall.cc');
+    _set('moemail_api_key', e.moemail_api_key);
+    _set('maliapi_base_url', e.maliapi_base_url||'https://maliapi.215.im/v1');
+    _set('maliapi_api_key', e.maliapi_api_key);
+    _set('maliapi_domain', e.maliapi_domain);
+    _set('luckmail_base_url', e.luckmail_base_url||'https://mails.luckyous.com');
+    _set('luckmail_api_key', e.luckmail_api_key);
+    _set('luckmail_project_code', e.luckmail_project_code||'grok');
+    _set('luckmail_domain', e.luckmail_domain);
+    _set('skymail_api_base', e.skymail_api_base||'https://api.skymail.ink');
+    _set('skymail_token', e.skymail_token);
+    _set('skymail_domain', e.skymail_domain);
+    _set('cloudmail_api_base', e.cloudmail_api_base);
+    _set('cloudmail_admin_email', e.cloudmail_admin_email);
+    _set('cloudmail_admin_password', e.cloudmail_admin_password);
+    _set('cloudmail_domain', e.cloudmail_domain);
+    _set('freemail_api_url', e.freemail_api_url);
+    _set('freemail_admin_token', e.freemail_admin_token);
+    _set('freemail_domain', e.freemail_domain);
+    _set('opentrashmail_api_url', e.opentrashmail_api_url);
+    _set('opentrashmail_domain', e.opentrashmail_domain);
+    _set('opentrashmail_password', e.opentrashmail_password);
+    _set('laoudo_auth', e.laoudo_auth);
+    _set('laoudo_email', e.laoudo_email);
+    _set('laoudo_account_id', e.laoudo_account_id);
     setEmailHint(e.hint||'');
     onEmailProviderChange();
   }catch(err){
     setEmailHint('加载邮箱配置失败: '+err.message);
   }
+}
+async function saveEmailConfig(){
+  const body={
+    provider: (document.getElementById('email_provider').value||'cfworker'),
+    email_failover: document.getElementById('email_failover').checked,
+    cfworker_api_url: _val('cfworker_api_url'),
+    cfworker_admin_token: _val('cfworker_admin_token'),
+    cfworker_domain: _val('cfworker_domain'),
+    cfworker_custom_auth: _val('cfworker_custom_auth'),
+    cfworker_subdomain: _val('cfworker_subdomain'),
+    moemail_api_url: _val('moemail_api_url'),
+    moemail_api_key: _val('moemail_api_key'),
+    maliapi_base_url: _val('maliapi_base_url'),
+    maliapi_api_key: _val('maliapi_api_key'),
+    maliapi_domain: _val('maliapi_domain'),
+    luckmail_base_url: _val('luckmail_base_url'),
+    luckmail_api_key: _val('luckmail_api_key'),
+    luckmail_project_code: _val('luckmail_project_code'),
+    luckmail_domain: _val('luckmail_domain'),
+    skymail_api_base: _val('skymail_api_base'),
+    skymail_token: _val('skymail_token'),
+    skymail_domain: _val('skymail_domain'),
+    cloudmail_api_base: _val('cloudmail_api_base'),
+    cloudmail_admin_email: _val('cloudmail_admin_email'),
+    cloudmail_admin_password: _val('cloudmail_admin_password'),
+    cloudmail_domain: _val('cloudmail_domain'),
+    freemail_api_url: _val('freemail_api_url'),
+    freemail_admin_token: _val('freemail_admin_token'),
+    freemail_domain: _val('freemail_domain'),
+    opentrashmail_api_url: _val('opentrashmail_api_url'),
+    opentrashmail_domain: _val('opentrashmail_domain'),
+    opentrashmail_password: _val('opentrashmail_password'),
+    laoudo_auth: _val('laoudo_auth'),
+    laoudo_email: _val('laoudo_email'),
+    laoudo_account_id: _val('laoudo_account_id'),
+  };
+  try{
+    const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    toast(j.message||'邮箱设置已保存');
+    if(j.email){
+      setEmailHint('已保存 · 当前: '+(j.email.provider||''));
+    }
+  }catch(e){toast('保存失败: '+e.message)}
 }
 function setEmailHint(text){
   const el=document.getElementById('email_hint');
@@ -1643,27 +2266,6 @@ function setEmailHint(text){
   const t=String(text||'').trim();
   el.textContent=t;
   el.style.display=t ? '' : 'none';
-}
-async function saveEmailConfig(){
-  const body={
-    provider: document.getElementById('email_provider').value,
-    email_failover: document.getElementById('email_failover').checked,
-    tempmailer_domain: document.getElementById('tempmailer_domain').value.trim(),
-    custom_api_base: document.getElementById('custom_api_base').value.trim(),
-    custom_api_key: document.getElementById('custom_api_key').value,
-    custom_auth_mode: document.getElementById('custom_auth_mode').value,
-    custom_domain: document.getElementById('custom_domain').value.trim(),
-    custom_path_accounts: document.getElementById('custom_path_accounts').value.trim(),
-    custom_path_messages: document.getElementById('custom_path_messages').value.trim(),
-    custom_path_token: document.getElementById('custom_path_token').value.trim(),
-  };
-  try{
-    const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    toast(j.message||'邮箱设置已保存');
-    if(j.email){
-      setEmailHint('已保存 · 当前: '+(j.email.provider||'')+(j.email.custom_api_base?(' · '+j.email.custom_api_base):''));
-    }
-  }catch(e){toast('保存失败: '+e.message)}
 }
 function toggleSelectAllFiles(on){
   const boxes=document.querySelectorAll('.chk-file');
@@ -1729,12 +2331,42 @@ async function backfillCpa(){
     poll();
   }catch(e){toast('补转失败: '+e.message)}
 }
+async function uploadSsoConvert(){
+  const input=document.getElementById('sso_upload_file');
+  if(!input || !input.files || !input.files.length){
+    toast('请先选择 SSO txt/json 文件');
+    return;
+  }
+  if(!confirm('上传后会整批替换当前工作区（旧账号与 CPA 会归档）。确定继续？')){
+    return;
+  }
+  const fd=new FormData();
+  fd.append('file', input.files[0]);
+  const btn=document.getElementById('btn_upload_convert');
+  if(btn) btn.disabled=true;
+  try{
+    const r=await fetch('/api/sso/upload-convert',{method:'POST',body:fd,credentials:'same-origin'});
+    const j=await r.json();
+    if(!r.ok || j.ok===false){
+      throw new Error(j.error||('HTTP '+r.status));
+    }
+    toast(j.message||('已入队 '+j.queued+' 个'));
+    if(input) input.value='';
+    poll();
+    setTimeout(()=>location.reload(), 800);
+  }catch(e){
+    toast('上传转换失败: '+e.message);
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
 let lastLogLen=0;
 async function poll(){
   try{
     const j=await api('/api/job/status');
     const st=j.job||{};
     const cpa=j.cpa||{};
+    const ws=j.workspace||{};
     document.getElementById('st_status').textContent=st.status||'idle';
     document.getElementById('st_dot').className='dot'+(st.running?' run':'');
     document.getElementById('st_sf').textContent=`${st.success||0} / ${st.fail||0}`;
@@ -1746,12 +2378,24 @@ async function poll(){
       document.getElementById('st_cpa_q').textContent=
         `${cpa.pending||0}待 / ${cpa.ok||0}成 / ${cpa.fail||0}败`;
     }
+    if(document.getElementById('st_accounts')){
+      document.getElementById('st_accounts').textContent=String(ws.account_count!=null?ws.account_count:(j.accounts||0));
+    }
     if(document.getElementById('cpa_hint')){
       const core = cpa.core_ok ? 'core就绪' : ('core失败: '+(cpa.core_error||''));
       const last = cpa.last_ok_email ? (' · 最近OK: '+cpa.last_ok_email) : '';
       const err = cpa.last_error ? (' · 最近错: '+cpa.last_error) : '';
       document.getElementById('cpa_hint').textContent =
         `代理走本机 Clash · 自动CPA: ${cpa.enabled?'开':'关'} · ${core} · 文件 ${cpa.files||0}${last}${err}`;
+    }
+    if(document.getElementById('upload_hint')){
+      const mode = ws.mode==='upload' ? '上传' : '注册';
+      const src = ws.source ? (' · 来源 '+ws.source) : '';
+      const tot = ws.total!=null ? (' · 本批 '+ws.total) : '';
+      const q = ws.queued!=null ? (' · 已入队 '+ws.queued) : '';
+      const okf = ' · CPA文件 '+(cpa.files||0);
+      document.getElementById('upload_hint').textContent =
+        '当前模式：'+mode+src+tot+q+okf;
     }
     const box=document.getElementById('logbox');
     const logs=j.logs||[];
@@ -1768,6 +2412,7 @@ poll();
 setInterval(poll, 2000);
 </script>
 </body></html>
+
 """
 
 PREVIEW_HTML = """
@@ -1978,11 +2623,12 @@ def download_accounts_json():
 
 @app.get("/download/cpa.zip")
 def download_cpa_zip():
-    """主接口 2：已自动 OAuth 转换的真 CPA JSON（auth_kind=oauth）。"""
+    """主接口 2：当前面板账号对应的 CPA JSON（auth_kind=oauth）。"""
     need = require_login()
     if need:
         return need
-    files = list_cpa_files()
+    # 只打包面板当前账号对应的 CPA，删掉的不会再进包
+    files = list_active_cpa_files()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         readme = (
@@ -1990,9 +2636,9 @@ def download_cpa_zip():
             "====================================\n\n"
             "1) 每个 xai-*.json 是 OAuth 凭证（access_token + refresh_token）。\n"
             "2) auth_kind=oauth，可直接放进 CLIProxyAPI auth-dir。\n"
-            "3) 由注册成功后的 web SSO 自动换票生成。\n"
-            "4) all.json 为全部账号数组；failed.jsonl 为转换失败记录（若有）。\n"
-            "5) 若 zip 为空：先注册，或点「补转未转换 CPA」。\n"
+            "3) 仅包含当前面板账号列表中的号（删除后不会再进此包）。\n"
+            "4) all.json 为全部账号数组。\n"
+            "5) 若 zip 为空：先注册/上传，或点「补转未转换 CPA」。\n"
         )
         zf.writestr("README.txt", readme)
         all_entries = []
@@ -2009,15 +2655,11 @@ def download_cpa_zip():
             "all.json",
             json.dumps(all_entries, ensure_ascii=False, indent=2) + "\n",
         )
-        if CPA_FAILED_PATH.exists():
-            try:
-                zf.write(CPA_FAILED_PATH, arcname="failed.jsonl")
-            except Exception:
-                pass
         if not files:
             zf.writestr(
                 "EMPTY.txt",
-                "暂无已转换的 CPA 文件。注册成功后会自动转换，或点击面板「补转未转换 CPA」。\n",
+                "暂无当前面板账号的 CPA 文件。注册/上传成功后会自动转换，"
+                "或点击面板「补转未转换 CPA」。\n",
             )
     buf.seek(0)
     fname = f"cpa_oauth_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
@@ -2027,10 +2669,10 @@ def download_cpa_zip():
 
 
 def _load_cpa_entries_for_sub2() -> Tuple[List[dict], List[str]]:
-    """Read existing CPA JSON files for Sub2 export. No re-OAuth."""
+    """Read CPA JSON for current panel accounts only. No re-OAuth."""
     entries: List[dict] = []
     name_hints: List[str] = []
-    for p in list_cpa_files():
+    for p in list_active_cpa_files():
         try:
             obj = json.loads(p.read_text(encoding="utf-8"))
             if not isinstance(obj, dict):
@@ -2166,9 +2808,9 @@ def download_sub2_zip():
             "   管理后台 → 账号 → 导入数据 → 上传 all.json\n"
             "2) grok-*.json：每个账号一份完整 sub2api-data（也可单独导入）。\n"
             "3) type=sub2api-data / version=1 / platform=grok / type=oauth\n"
-            "4) 由已转换的 CPA OAuth 凭证现场映射，不重新注册/换票。\n"
+            "4) 仅映射当前面板账号对应的 CPA，删除后不会再进此包。\n"
             "5) proxies 为空；导入后请在 Sub2API 里绑定分组/代理。\n"
-            "6) 若 zip 为空：先注册，或点面板「补转未转换 CPA」。\n"
+            "6) 若 zip 为空：先注册/上传并等待 CPA 转换完成。\n"
         )
         zf.writestr("README.txt", readme)
 
@@ -2194,8 +2836,7 @@ def download_sub2_zip():
         if not accounts:
             zf.writestr(
                 "EMPTY.txt",
-                "暂无已转换账号。注册成功后会自动转 CPA，再点「下载 Sub2」；"
-                "或先点面板「补转未转换 CPA」。\n",
+                "暂无当前面板账号的 CPA。注册/上传成功并转换后，再点「下载 Sub2」。\n",
             )
 
     buf.seek(0)
@@ -2284,7 +2925,7 @@ def api_nodes_select():
 
 @app.post("/api/accounts/delete")
 def api_accounts_delete():
-    """Delete selected accounts_*.txt files (after user downloaded them)."""
+    """Delete selected accounts_*.txt and prune matching CPA JSON."""
     need = require_login()
     if need:
         return need
@@ -2311,6 +2952,13 @@ def api_accounts_delete():
         except Exception as e:
             errors.append(f"{name}: {e}")
 
+    pruned = 0
+    if deleted:
+        # 同步清掉已不在面板里的 CPA，保证下载数量 = 面板当前数量
+        pruned = prune_orphan_cpa()
+        if pruned:
+            log_line(f"[*] 已清理无主账号的 CPA 文件: {pruned} 个")
+
     if not deleted and errors:
         return jsonify({"ok": False, "error": "; ".join(errors)}), 400
     return jsonify(
@@ -2319,7 +2967,9 @@ def api_accounts_delete():
             "deleted": deleted,
             "missing": missing,
             "errors": errors,
-            "message": f"已删除 {len(deleted)} 个文件"
+            "cpa_pruned": pruned,
+            "message": f"已删除 {len(deleted)} 个账号文件"
+            + (f"，清理 CPA {pruned}" if pruned else "")
             + (f"，跳过 {len(missing)}" if missing else ""),
         }
     )
@@ -2353,7 +3003,16 @@ def api_job_status():
         return need
     with _job_lock:
         job = dict(_job)
-    return jsonify({"ok": True, "job": job, "logs": list(_logs), "cpa": cpa_stats()})
+    return jsonify(
+        {
+            "ok": True,
+            "job": job,
+            "logs": list(_logs),
+            "cpa": cpa_stats(),
+            "workspace": workspace_stats(),
+            "accounts": len(unique_accounts()),
+        }
+    )
 
 
 @app.get("/api/cpa/status")
@@ -2361,7 +3020,7 @@ def api_cpa_status():
     need = require_login()
     if need:
         return need
-    return jsonify({"ok": True, "cpa": cpa_stats()})
+    return jsonify({"ok": True, "cpa": cpa_stats(), "workspace": workspace_stats()})
 
 
 @app.post("/api/cpa/backfill")
@@ -2380,6 +3039,71 @@ def api_cpa_backfill():
     n = enqueue_missing_accounts(limit=limit)
     log_line(f"[CPA] 手动补转入队: {n}")
     return jsonify({"ok": True, "queued": n, "message": f"已入队 {n} 个待转换 SSO"})
+
+
+@app.post("/api/sso/upload-convert")
+def api_sso_upload_convert():
+    """Upload SSO txt/json → whole-batch replace workspace → queue CPA convert.
+
+    Download buttons keep using current workspace only.
+    """
+    need = require_login()
+    if need:
+        return need
+    if not _CPA_CORE_OK or convert_one is None or parse_uploaded_records is None:
+        return jsonify({"ok": False, "error": f"core unavailable: {_CPA_CORE_ERR}"}), 500
+    if bool(_job.get("running")):
+        return jsonify({"ok": False, "error": "注册任务进行中，请先停止再上传"}), 400
+
+    f = request.files.get("file") or request.files.get("sso")
+    if f is None:
+        return jsonify({"ok": False, "error": "请上传 file 字段（txt/json）"}), 400
+    filename = (f.filename or "upload.txt").strip()
+    raw = f.read()
+    if not raw:
+        return jsonify({"ok": False, "error": "文件为空"}), 400
+    if len(raw) > 30 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "文件过大（>30MB）"}), 400
+
+    try:
+        records = parse_upload_file_bytes(raw, filename=filename)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"解析失败: {e}"}), 400
+    if not records:
+        return jsonify({"ok": False, "error": "未解析到有效 SSO"}), 400
+
+    meta = reset_workspace_for_upload(source_name=filename, total=len(records))
+    out_path = write_upload_accounts_file(records, source_name=filename)
+
+    queued = 0
+    for rec in records:
+        ok, _ = enqueue_cpa_convert(
+            email=rec.get("email") or "",
+            sso=rec.get("sso") or "",
+            password=rec.get("password") or "",
+            source=out_path.name,
+            force=True,
+        )
+        if ok:
+            queued += 1
+
+    _workspace_meta["queued"] = queued
+    _workspace_meta["accounts_file"] = out_path.name
+    log_line(
+        f"[UPLOAD] {filename} → {len(records)} SSO，入队 {queued}，"
+        f"工作区文件 {out_path.name}（旧数据已归档）"
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "message": f"已替换工作区：解析 {len(records)}，入队 {queued}。请等 CPA 队列转完后下载。",
+            "parsed": len(records),
+            "queued": queued,
+            "accounts_file": out_path.name,
+            "workspace": workspace_stats(),
+            "archived": meta.get("archived") or "",
+        }
+    )
 
 
 def _normalize_browser_engine(value: str) -> str:
@@ -2438,10 +3162,28 @@ def api_job_start():
         cfg = load_config()
         cfg["browser_engine"] = eng
         save_config(cfg)
+    # 从上传模式切到注册：整批归档清空，避免和注册号混在一起
+    if _workspace_mode == "upload":
+        _drain_cpa_queue()
+        arch = _archive_current_workspace("register-start")
+        with _cpa_lock:
+            _cpa_done.clear()
+            _cpa_inflight.clear()
+            _cpa_state["pending"] = 0
+            _cpa_state["ok"] = 0
+            _cpa_state["fail"] = 0
+            _cpa_state["last_error"] = ""
+            _cpa_state["last_ok_email"] = ""
+        set_workspace_register_mode("register-start")
+        log_line(
+            f"[WORKSPACE] 开始注册 → 已归档上传批次"
+            + (f" ({arch})" if arch else "")
+            + "，工作区清空后重新注册"
+        )
     ok, msg = start_job(count)
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
-    return jsonify({"ok": True, "message": msg})
+    return jsonify({"ok": True, "message": msg, "workspace": workspace_stats()})
 
 
 @app.post("/api/job/stop")
